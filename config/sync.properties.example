@@ -1,0 +1,22 @@
+# Copy to config/sync.properties and adjust.
+#
+# source - the database that has the extra data
+# target - the source of truth that receives the missing rows
+#
+# Find each container's published MySQL port with:  docker port <container name> 3306
+
+source.label=h4
+source.url=jdbc:mysql://127.0.0.1:3307/openmrs?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8
+source.user=openmrs
+source.password=openmrs
+
+target.label=h9
+target.url=jdbc:mysql://127.0.0.1:3308/openmrs?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8
+target.user=openmrs
+target.password=openmrs
+
+# Relative to this file.
+excludedTablesFile=excluded-tables.txt
+
+# Each run writes a timestamped folder here (relative to where you run the jar).
+outputDir=output
