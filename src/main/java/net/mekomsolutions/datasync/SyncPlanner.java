@@ -2,8 +2,8 @@ package net.mekomsolutions.datasync;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -11,216 +11,246 @@ import java.util.Map;
 import java.util.Set;
 
 import net.mekomsolutions.datasync.IdentityResolver.Side;
-import net.mekomsolutions.datasync.MissingRowFinder.MissingRow;
-import net.mekomsolutions.datasync.MissingRowFinder.TableDiff;
+import net.mekomsolutions.datasync.SyncPlan.BlockedRow;
+import net.mekomsolutions.datasync.SyncPlan.PlannedRow;
+import net.mekomsolutions.datasync.SyncPlan.Ref;
 
 /**
- * Decides which missing rows can be copied. A row can be copied when every foreign key it holds points at a row
- * that already exists in the target or is itself going to be copied. Rows pointing at anything else (for example
- * a concept that only exists in the source) are blocked, and so is everything that depends on a blocked row.
+ * Decides which of a patient's missing rows can be copied.
+ *
+ * <p>A row can be copied when every foreign key it holds points at a row that is already in the target or is
+ * copied along with it. Rows the patient's data points at that the target lacks (the user who registered the
+ * patient, that user's person row, a provider, ...) are pulled in from the source and planned too, as long as their
+ * table is in scope. Anything else, such as an obs on a concept the target does not have, is blocked, and so is
+ * every row that depends on a blocked row.
  */
 final class SyncPlanner {
 
-    /** A foreign key value of a missing row, translated to the identity of the row it points at. */
-    record Ref(Schema.ForeignKey fk, Schema.Table refTable, String refIdentity) {}
-
-    record PlannedRow(Schema.Table table, MissingRow row, Map<String, Ref> refs) {}
-
-    record BlockedRow(Schema.Table table, MissingRow row, String reason) {}
-
-    record Plan(List<Schema.Table> order, Map<Schema.Table, List<PlannedRow>> rows, List<BlockedRow> blocked,
-                Set<String> cycleTables) {
-        int size() {
-            return rows.values().stream().mapToInt(List::size).sum();
-        }
-    }
-
-    private final Schema schema;
-    private final Schema targetSchema;
+    private final Schema source;
+    private final SyncScope scope;
+    private final TableLinks links;
+    private final SourceReader reader;
     private final IdentityResolver resolver;
 
-    SyncPlanner(Schema schema, Schema targetSchema, IdentityResolver resolver) {
-        this.schema = schema;
-        this.targetSchema = targetSchema;
+    SyncPlanner(Schema source, SyncScope scope, TableLinks links, SourceReader reader, IdentityResolver resolver) {
+        this.source = source;
+        this.scope = scope;
+        this.links = links;
+        this.reader = reader;
         this.resolver = resolver;
     }
 
-    Plan plan(List<TableDiff> diffs) throws SQLException {
-        Map<Schema.Table, Map<String, PlannedRow>> planned = new LinkedHashMap<>();
-        List<BlockedRow> blocked = new ArrayList<>();
+    SyncPlan plan(Map<Schema.Table, List<SourceRow>> missing) throws SQLException {
+        Draft draft = new Draft();
+        Map<Schema.Table, List<SourceRow>> next = missing;
+        while (!next.isEmpty()) {
+            List<PlannedRow> added = addRows(draft, next);
+            next = missingParents(draft, added);
+        }
+        dropUnsatisfiable(draft);
+        return draft.toPlan();
+    }
 
-        for (TableDiff d : diffs) {
-            Map<String, PlannedRow> rows = new LinkedHashMap<>();
-            planned.put(d.table(), rows);
-            for (Schema.ForeignKey fk : d.table().foreignKeys()) {
-                List<Object> values = new ArrayList<>();
-                for (MissingRow r : d.missing()) {
-                    values.add(r.values().get(fk.column()));
-                }
-                resolver.prefetchIdentities(Side.SOURCE, schema.table(fk.refTable()), fk.refColumn(), values);
+    /** Plans rows with their foreign keys resolved; a row pointing at nothing, even in the source, is blocked. */
+    private List<PlannedRow> addRows(Draft draft, Map<Schema.Table, List<SourceRow>> rowsByTable) throws SQLException {
+        List<PlannedRow> added = new ArrayList<>();
+        for (Map.Entry<Schema.Table, List<SourceRow>> e : rowsByTable.entrySet()) {
+            Schema.Table table = e.getKey();
+            for (Schema.ForeignKey fk : table.foreignKeys()) {
+                resolver.prefetchIdentities(Side.SOURCE, source.table(fk.refTable()), fk.refColumn(),
+                        SourceReader.values(e.getValue(), fk.column()));
             }
-            for (MissingRow r : d.missing()) {
+            for (SourceRow row : e.getValue()) {
+                if (draft.contains(table, row.identity())) {
+                    continue;
+                }
                 Map<String, Ref> refs = new LinkedHashMap<>();
                 String problem = null;
-                for (Schema.ForeignKey fk : d.table().foreignKeys()) {
-                    Object v = r.values().get(fk.column());
-                    if (v == null) {
+                for (Schema.ForeignKey fk : table.foreignKeys()) {
+                    Object value = row.values().get(fk.column());
+                    if (value == null) {
                         continue;
                     }
-                    Schema.Table refTable = schema.table(fk.refTable());
-                    String refId = resolver.identityOf(Side.SOURCE, refTable, fk.refColumn(), v);
-                    if (refId == null) {
-                        problem = fk.column() + "=" + Db.key(v) + " points at a " + fk.refTable()
+                    Schema.Table refTable = source.table(fk.refTable());
+                    String refIdentity = resolver.identityOf(Side.SOURCE, refTable, fk.refColumn(), value);
+                    if (refIdentity == null) {
+                        problem = fk.column() + "=" + Db.key(value) + " points at a " + fk.refTable()
                                 + " row that does not exist in the source database";
                         break;
                     }
-                    refs.put(fk.column(), new Ref(fk, refTable, refId));
+                    refs.put(fk.column(), new Ref(fk, refTable, value, refIdentity));
                 }
                 if (problem != null) {
-                    blocked.add(new BlockedRow(d.table(), r, problem));
+                    draft.block(new BlockedRow(table, row, problem));
                 } else {
-                    rows.put(r.identity(), new PlannedRow(d.table(), r, refs));
+                    PlannedRow planned = new PlannedRow(table, row, refs);
+                    draft.add(planned);
+                    added.add(planned);
                 }
             }
         }
+        return added;
+    }
 
-        // Which referenced rows are already in the target.
-        Map<String, Set<String>> wanted = new HashMap<>();
-        for (Map<String, PlannedRow> rows : planned.values()) {
-            for (PlannedRow p : rows.values()) {
-                for (Ref ref : p.refs().values()) {
-                    wanted.computeIfAbsent(ref.refTable().name() + "|" + ref.fk().refColumn(), k -> new LinkedHashSet<>())
-                            .add(ref.refIdentity());
+    /**
+     * Source rows that {@code added} points at which are neither in the target nor planned yet, together with
+     * their extension rows. References into tables outside the scope are left for {@link #dropUnsatisfiable}.
+     */
+    private Map<Schema.Table, List<SourceRow>> missingParents(Draft draft, List<PlannedRow> added)
+            throws SQLException {
+        prefetchTargetValues(added);
+        Map<Schema.Table, Map<String, Set<Object>>> wanted = new LinkedHashMap<>();
+        for (PlannedRow row : added) {
+            for (Ref ref : row.refs().values()) {
+                if (scope.includes(ref.refTable()) && !draft.contains(ref.refTable(), ref.refIdentity())
+                        && !inTarget(ref)) {
+                    wanted.computeIfAbsent(ref.refTable(), t -> new LinkedHashMap<>())
+                            .computeIfAbsent(ref.fk().refColumn(), c -> new LinkedHashSet<>())
+                            .add(ref.sourceValue());
                 }
             }
         }
-        for (Map.Entry<String, Set<String>> e : wanted.entrySet()) {
-            String[] parts = e.getKey().split("\\|", 2);
-            resolver.prefetchValues(Side.TARGET, schema.table(parts[0]), parts[1], e.getValue());
+        Map<Schema.Table, List<SourceRow>> parents = new LinkedHashMap<>();
+        for (Map.Entry<Schema.Table, Map<String, Set<Object>>> byTable : wanted.entrySet()) {
+            for (Map.Entry<String, Set<Object>> byColumn : byTable.getValue().entrySet()) {
+                List<SourceRow> rows = reader.rowsWhere(byTable.getKey(), byColumn.getKey(), byColumn.getValue());
+                addWithExtensions(parents, byTable.getKey(), rows);
+            }
         }
+        return parents;
+    }
 
-        // Drop rows whose references cannot be satisfied, repeating until nothing changes.
-        Map<Schema.Table, Map<String, String>> blockedIds = new HashMap<>();
+    /** Adds {@code rows} and, recursively, the rows extending them that the target does not have. */
+    private void addWithExtensions(Map<Schema.Table, List<SourceRow>> into, Schema.Table table, List<SourceRow> rows)
+            throws SQLException {
+        if (rows.isEmpty()) {
+            return;
+        }
+        into.computeIfAbsent(table, t -> new ArrayList<>()).addAll(rows);
+        for (TableLinks.Link link : links.extensionsOf(table)) {
+            List<Object> keys = SourceReader.values(rows, link.fk().refColumn());
+            if (keys.isEmpty()) {
+                continue;
+            }
+            List<SourceRow> extensions = reader.rowsWhere(link.child(), link.fk().column(), keys);
+            Set<String> present = resolver.existing(Side.TARGET, link.child(),
+                    extensions.stream().map(SourceRow::identity).toList());
+            addWithExtensions(into, link.child(),
+                    extensions.stream().filter(r -> !present.contains(r.identity())).toList());
+        }
+    }
+
+    /** Looks up, in a few queries, the target values behind every reference of {@code rows}. */
+    private void prefetchTargetValues(List<PlannedRow> rows) throws SQLException {
+        Map<Schema.Table, Map<String, Set<String>>> wanted = new LinkedHashMap<>();
+        for (PlannedRow row : rows) {
+            for (Ref ref : row.refs().values()) {
+                wanted.computeIfAbsent(ref.refTable(), t -> new LinkedHashMap<>())
+                        .computeIfAbsent(ref.fk().refColumn(), c -> new LinkedHashSet<>())
+                        .add(ref.refIdentity());
+            }
+        }
+        for (Map.Entry<Schema.Table, Map<String, Set<String>>> byTable : wanted.entrySet()) {
+            for (Map.Entry<String, Set<String>> byColumn : byTable.getValue().entrySet()) {
+                resolver.prefetchValues(Side.TARGET, byTable.getKey(), byColumn.getKey(), byColumn.getValue());
+            }
+        }
+    }
+
+    private boolean inTarget(Ref ref) throws SQLException {
+        return resolver.valueFor(Side.TARGET, ref.refTable(), ref.fk().refColumn(), ref.refIdentity()) != null;
+    }
+
+    /** Blocks rows whose references cannot be satisfied, repeating until nothing changes. */
+    private void dropUnsatisfiable(Draft draft) throws SQLException {
         boolean changed = true;
         while (changed) {
             changed = false;
-            for (Map.Entry<Schema.Table, Map<String, PlannedRow>> e : planned.entrySet()) {
-                var it = e.getValue().values().iterator();
+            for (Map<String, PlannedRow> rows : draft.planned.values()) {
+                var it = rows.values().iterator();
                 while (it.hasNext()) {
-                    PlannedRow p = it.next();
-                    String reason = unsatisfied(p, planned, blockedIds);
+                    PlannedRow row = it.next();
+                    String reason = unsatisfied(row, draft);
                     if (reason != null) {
                         it.remove();
-                        blocked.add(new BlockedRow(p.table(), p.row(), reason));
-                        blockedIds.computeIfAbsent(p.table(), k -> new HashMap<>()).put(p.row().identity(), reason);
+                        draft.block(new BlockedRow(row.table(), row.row(), reason));
                         changed = true;
                     }
                 }
             }
         }
-
-        Map<Schema.Table, List<PlannedRow>> result = new LinkedHashMap<>();
-        for (Map.Entry<Schema.Table, Map<String, PlannedRow>> e : planned.entrySet()) {
-            if (!e.getValue().isEmpty()) {
-                result.put(e.getKey(), new ArrayList<>(e.getValue().values()));
-            }
-        }
-        Set<String> cycleTables = new LinkedHashSet<>();
-        List<Schema.Table> order = topologicalOrder(result, cycleTables);
-        return new Plan(order, result, blocked, cycleTables);
     }
 
-    private String unsatisfied(PlannedRow p, Map<Schema.Table, Map<String, PlannedRow>> planned,
-                               Map<Schema.Table, Map<String, String>> blockedIds) throws SQLException {
-        if (targetSchema.table(p.table().name()) == null) {
-            return "table does not exist in the target database";
-        }
-        for (Ref ref : p.refs().values()) {
-            if (resolver.valueFor(Side.TARGET, ref.refTable(), ref.fk().refColumn(), ref.refIdentity()) != null) {
+    private String unsatisfied(PlannedRow row, Draft draft) throws SQLException {
+        for (Ref ref : row.refs().values()) {
+            if (inTarget(ref) || draft.isPlanned(ref.refTable(), ref.refIdentity())) {
                 continue;
             }
-            Map<String, PlannedRow> refRows = planned.get(ref.refTable());
-            if (refRows != null && refRows.containsKey(ref.refIdentity())) {
-                continue;
+            String parent = ref.refTable().name() + " " + IdentityResolver.readable(ref.refIdentity());
+            if (draft.isBlocked(ref.refTable(), ref.refIdentity())) {
+                return ref.fk().column() + " depends on " + parent + ", which cannot be synced";
             }
-            Map<String, String> b = blockedIds.get(ref.refTable());
-            if (b != null && b.containsKey(ref.refIdentity())) {
-                return ref.fk().column() + " depends on a " + ref.refTable().name() + " row (" + shortId(ref.refIdentity())
-                        + ") that cannot be synced";
-            }
-            return ref.fk().column() + " points at " + ref.refTable().name() + " " + shortId(ref.refIdentity())
-                    + ", which is missing from the target"
-                    + (planned.containsKey(ref.refTable()) ? "" : " and that table is not synced (excluded or metadata)");
+            return ref.fk().column() + " points at " + parent + ", which is missing from the target"
+                    + (scope.includes(ref.refTable()) ? "" : " and that table is not synced (excluded or metadata)");
         }
         return null;
     }
 
-    private static String shortId(String identity) {
-        return identity.replace('\u001F', '/');
-    }
+    /** The plan being built: planned and blocked rows by table and identity. */
+    private static final class Draft {
+        final Map<Schema.Table, Map<String, PlannedRow>> planned = new LinkedHashMap<>();
+        final Map<Schema.Table, Map<String, BlockedRow>> blocked = new HashMap<>();
+        final List<BlockedRow> blockedInOrder = new ArrayList<>();
 
-    /** Parents before children. Tables in a foreign-key cycle (person and users) are ordered best-effort. */
-    private static List<Schema.Table> topologicalOrder(Map<Schema.Table, List<PlannedRow>> rows,
-                                                       Set<String> cycleTables) {
-        Map<Schema.Table, Set<Schema.Table>> deps = new LinkedHashMap<>();
-        for (Schema.Table t : rows.keySet()) {
-            Set<Schema.Table> d = new HashSet<>();
-            for (Schema.ForeignKey fk : t.foreignKeys()) {
-                for (Schema.Table other : rows.keySet()) {
-                    if (other != t && other.name().equals(fk.refTable())) {
-                        d.add(other);
-                    }
-                }
-            }
-            deps.put(t, d);
+        void add(PlannedRow row) {
+            planned.computeIfAbsent(row.table(), t -> new LinkedHashMap<>()).put(row.row().identity(), row);
         }
-        List<Schema.Table> order = new ArrayList<>();
-        Set<Schema.Table> done = new HashSet<>();
-        while (order.size() < deps.size()) {
-            Schema.Table next = null;
-            for (Map.Entry<Schema.Table, Set<Schema.Table>> e : deps.entrySet()) {
-                if (!done.contains(e.getKey()) && done.containsAll(e.getValue())) {
-                    next = e.getKey();
-                    break;
-                }
-            }
-            if (next == null) {
-                // Every remaining table waits on another: break a cycle at the member with the fewest unmet
-                // dependencies. Tables merely waiting on a cycle are not candidates.
-                int best = Integer.MAX_VALUE;
-                for (Map.Entry<Schema.Table, Set<Schema.Table>> e : deps.entrySet()) {
-                    if (done.contains(e.getKey()) || !onCycle(e.getKey(), deps, done)) {
-                        continue;
-                    }
-                    int unmet = (int) e.getValue().stream().filter(x -> !done.contains(x)).count();
-                    if (unmet < best) {
-                        best = unmet;
-                        next = e.getKey();
-                    }
-                }
-                cycleTables.add(next.name());
-            }
-            order.add(next);
-            done.add(next);
-        }
-        return order;
-    }
 
-    /** Whether {@code start} can reach itself through dependencies that are not yet done. */
-    private static boolean onCycle(Schema.Table start, Map<Schema.Table, Set<Schema.Table>> deps,
-                                   Set<Schema.Table> done) {
-        Set<Schema.Table> seen = new HashSet<>();
-        List<Schema.Table> stack = new ArrayList<>(deps.get(start));
-        while (!stack.isEmpty()) {
-            Schema.Table t = stack.remove(stack.size() - 1);
-            if (t == start) {
-                return true;
-            }
-            if (done.contains(t) || !seen.add(t)) {
-                continue;
-            }
-            stack.addAll(deps.get(t));
+        void block(BlockedRow row) {
+            blocked.computeIfAbsent(row.table(), t -> new HashMap<>()).put(row.row().identity(), row);
+            blockedInOrder.add(row);
         }
-        return false;
+
+        boolean isPlanned(Schema.Table table, String identity) {
+            return planned.getOrDefault(table, Map.of()).containsKey(identity);
+        }
+
+        boolean isBlocked(Schema.Table table, String identity) {
+            return blocked.getOrDefault(table, Map.of()).containsKey(identity);
+        }
+
+        boolean contains(Schema.Table table, String identity) {
+            return isPlanned(table, identity) || isBlocked(table, identity);
+        }
+
+        SyncPlan toPlan() {
+            Map<Schema.Table, List<PlannedRow>> rows = new LinkedHashMap<>();
+            planned.forEach((table, byIdentity) -> {
+                if (!byIdentity.isEmpty()) {
+                    List<PlannedRow> inOrder = new ArrayList<>(byIdentity.values());
+                    inOrder.sort(byPrimaryKey(table));
+                    rows.put(table, inOrder);
+                }
+            });
+            TableOrder order = TableOrder.of(rows.keySet());
+            return new SyncPlan(order.tables(), rows, blockedInOrder, order.cycleBreaks());
+        }
+
+        /** Source primary key order, so parents usually come before the children pointing at them (obs groups). */
+        private static Comparator<PlannedRow> byPrimaryKey(Schema.Table table) {
+            return (r1, r2) -> {
+                for (String col : table.primaryKey()) {
+                    Object a = r1.row().values().get(col);
+                    Object b = r2.row().values().get(col);
+                    int c = a instanceof Number na && b instanceof Number nb
+                            ? Long.compare(na.longValue(), nb.longValue())
+                            : String.valueOf(a).compareTo(String.valueOf(b));
+                    if (c != 0) {
+                        return c;
+                    }
+                }
+                return 0;
+            };
+        }
     }
 }
