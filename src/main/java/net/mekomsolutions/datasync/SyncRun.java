@@ -4,6 +4,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -20,12 +21,24 @@ import net.mekomsolutions.datasync.PatientResult.Status;
  */
 final class SyncRun {
 
+    /** Reads a database's schema; {@link Schema#read} except in tests. */
+    @FunctionalInterface
+    interface SchemaReader {
+        Schema read(Connection connection) throws SQLException;
+    }
+
     private final Options options;
     private final SyncConfig config;
+    private final SchemaReader schemaReader;
 
     SyncRun(Options options, SyncConfig config) {
+        this(options, config, Schema::read);
+    }
+
+    SyncRun(Options options, SyncConfig config, SchemaReader schemaReader) {
         this.options = options;
         this.config = config;
+        this.schemaReader = schemaReader;
     }
 
     /** Runs and returns the process exit code: 0 when every patient went through, 1 otherwise. */
@@ -34,9 +47,10 @@ final class SyncRun {
             Log.info("Source (has the extra data): " + config.source().label() + " " + config.source().url());
             Log.info("Target (source of truth, receives the data): " + config.target().label() + " "
                     + config.target().url());
-            Schema source = Schema.read(db.source());
-            Schema target = Schema.read(db.targetRead());
-            PatientSyncer syncer = patientSyncer(db, source, target);
+            Schema source = schemaReader.read(db.source());
+            Schema target = schemaReader.read(db.targetRead());
+            warnAboutTablesMissingFromTarget(source, target);
+            PatientSyncer syncer = PatientSyncer.create(db, source, target, config, options.mode());
 
             List<String> patients = PatientList.resolve(options, db.source());
             Log.info(describeMode() + " for " + patients.size() + " patient(s)");
@@ -68,20 +82,10 @@ final class SyncRun {
         }
     }
 
-    private PatientSyncer patientSyncer(Databases db, Schema source, Schema target) {
-        SyncScope scope = new SyncScope(target, config);
+    private void warnAboutTablesMissingFromTarget(Schema source, Schema target) {
         source.tables().stream()
                 .filter(t -> !config.isExcluded(t.name()) && target.table(t.name()) == null)
                 .forEach(t -> Log.warn("Table " + t.name() + " is not in the target database, skipping it"));
-        TableLinks links = new TableLinks(source, scope);
-        IdentityResolver resolver = new IdentityResolver(source, db.source(), db.targetRead());
-        SourceReader reader = new SourceReader(db.source(), resolver);
-        return new PatientSyncer(
-                new PatientRecordCollector(source, links, reader),
-                resolver,
-                new SyncPlanner(source, scope, links, reader, resolver),
-                new SyncExecutor(db.targetWrite(), scope, resolver),
-                options.mode());
     }
 
     /** Processes one patient; any failure is turned into a FAILED result so the run can carry on. */

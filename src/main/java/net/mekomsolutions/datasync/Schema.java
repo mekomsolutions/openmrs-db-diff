@@ -90,6 +90,18 @@ public final class Schema {
         public String toString() {
             return name;
         }
+
+        void addColumn(Column column) {
+            columns.put(column.name(), column);
+        }
+
+        void addPrimaryKeyColumn(String column) {
+            primaryKey.add(column);
+        }
+
+        void addForeignKey(ForeignKey fk) {
+            foreignKeys.putIfAbsent(fk.column(), fk);
+        }
     }
 
     private final Map<String, Table> tables = new LinkedHashMap<>();
@@ -102,13 +114,17 @@ public final class Schema {
         return tables.get(name);
     }
 
+    /** Adds an empty table. {@link #read} builds schemas this way; tests use it to build them from other databases. */
+    Table addTable(String name) {
+        return tables.computeIfAbsent(name, Table::new);
+    }
+
     public static Schema read(Connection conn) throws SQLException {
         Schema schema = new Schema();
         try (ResultSet rs = query(conn, "SELECT TABLE_NAME FROM information_schema.TABLES "
                 + "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME")) {
             while (rs.next()) {
-                String t = rs.getString(1);
-                schema.tables.put(t, new Table(t));
+                schema.addTable(rs.getString(1));
             }
         }
         try (ResultSet rs = query(conn, "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, EXTRA "
@@ -120,7 +136,7 @@ public final class Schema {
                     continue; // a view
                 }
                 String extra = rs.getString(5) == null ? "" : rs.getString(5).toLowerCase(Locale.ROOT);
-                t.columns.put(rs.getString(2), new Column(rs.getString(2),
+                t.addColumn(new Column(rs.getString(2),
                         rs.getString(3).toLowerCase(Locale.ROOT),
                         "YES".equals(rs.getString(4)),
                         extra.contains("auto_increment")));
@@ -132,7 +148,7 @@ public final class Schema {
             while (rs.next()) {
                 Table t = schema.tables.get(rs.getString(1));
                 if (t != null) {
-                    t.primaryKey.add(rs.getString(2));
+                    t.addPrimaryKeyColumn(rs.getString(2));
                 }
             }
         }
@@ -155,7 +171,7 @@ public final class Schema {
             String[] fk = e.getValue().get(0);
             Table t = schema.tables.get(fk[0]);
             if (t != null && schema.tables.containsKey(fk[2])) {
-                t.foreignKeys.putIfAbsent(fk[1], new ForeignKey(fk[1], fk[2], fk[3]));
+                t.addForeignKey(new ForeignKey(fk[1], fk[2], fk[3]));
             }
         }
         return schema;

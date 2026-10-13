@@ -28,6 +28,20 @@ final class PatientSyncer {
         this.mode = mode;
     }
 
+    /** A syncer wired to the run's connections, where every lookup cache is shared across patients. */
+    static PatientSyncer create(Databases db, Schema source, Schema target, SyncConfig config, RunMode mode) {
+        SyncScope scope = new SyncScope(target, config);
+        TableLinks links = new TableLinks(source, scope);
+        IdentityResolver resolver = new IdentityResolver(source, db.source(), db.targetRead());
+        SourceReader reader = new SourceReader(db.source(), resolver);
+        return new PatientSyncer(
+                new PatientRecordCollector(source, links, reader),
+                resolver,
+                new SyncPlanner(source, scope, links, reader, resolver),
+                new SyncExecutor(db.targetWrite(), scope, resolver),
+                mode);
+    }
+
     /**
      * Processes one patient. A failed insert gives a FAILED result that still carries the plan; any other exception
      * is thrown. Either way nothing was written for this patient: inserts only happen inside the executor's
@@ -40,7 +54,7 @@ final class PatientSyncer {
         }
         PatientRecord record = found.get();
         try {
-            SyncPlan plan = planner.plan(missingFromTarget(record));
+            SyncPlan plan = planner.plan(missingFromTarget(resolver, record));
             if (plan.missing() == 0) {
                 return result(record, plan, Status.IN_SYNC, Map.of());
             }
@@ -63,7 +77,8 @@ final class PatientSyncer {
     }
 
     /** The rows of {@code record} that the target does not have. */
-    private Map<Schema.Table, List<SourceRow>> missingFromTarget(PatientRecord record) throws SQLException {
+    static Map<Schema.Table, List<SourceRow>> missingFromTarget(IdentityResolver resolver, PatientRecord record)
+            throws SQLException {
         Map<Schema.Table, List<SourceRow>> missing = new LinkedHashMap<>();
         for (Map.Entry<Schema.Table, List<SourceRow>> e : record.rows().entrySet()) {
             Set<String> present = resolver.existing(Side.TARGET, e.getKey(),
