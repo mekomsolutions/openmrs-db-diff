@@ -155,7 +155,18 @@ otherwise new patients will not show up in patient search.
   report covers the patients processed so far; patients already applied stay applied, so it is safe to re-run.
 - Rows with a NULL uuid are ignored.
 
-## Self-test
+## Tests
+
+```bash
+mvn test
+```
+
+Unit tests need no Docker: each one loads the fixtures into two in-memory H2 databases in MySQL mode, standing
+in for the source and the target. They cover the command line, patient selection, how a patient's record is
+collected, planning (blocked rows, pulled-in users, table order), each run mode, failure isolation and the report
+files.
+
+### End-to-end self-test
 
 `scripts/local-test.sh` starts two throwaway MySQL 5.7 containers, loads a small OpenMRS-shaped schema with
 tricky cases (person ↔ users cycle, obs groups, drug_order, user_role, an obs on a concept the target does not
