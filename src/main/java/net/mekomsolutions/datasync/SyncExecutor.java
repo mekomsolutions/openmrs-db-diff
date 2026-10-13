@@ -50,7 +50,6 @@ final class SyncExecutor {
                 inserted.put(table.name(), insertRows(scope.targetTable(table), plan.rows().get(table), fixups));
             }
             applyFixups(fixups);
-            setForeignKeyChecks(true);
             if (commit) {
                 target.commit();
                 resolver.commitInserts();
@@ -61,7 +60,7 @@ final class SyncExecutor {
                 target.rollback();
                 resolver.discardInserts();
             }
-            setForeignKeyChecks(true);
+            setForeignKeyChecks(true); // only after commit or rollback: on some databases it ends the transaction
             target.setAutoCommit(autoCommit);
         }
         return inserted;
