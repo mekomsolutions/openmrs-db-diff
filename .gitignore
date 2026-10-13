@@ -1,0 +1,5 @@
+target/
+output/
+config/sync.properties
+*.iml
+.idea/
