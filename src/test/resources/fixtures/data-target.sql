@@ -12,4 +12,7 @@ INSERT INTO encounter_type VALUES (1, 'Visit', 'etype-visit');
 INSERT INTO role VALUES ('Provider', 'role-provider');
 INSERT INTO encounter VALUES (1, 1, 3, 1, '2021-02-02 10:00:00', 1, '2021-02-02 10:00:00', 'enc-p1');
 INSERT INTO obs VALUES (1, 3, 2, 1, NULL, '2021-02-02 10:00:00', 70, NULL, 1, '2021-02-02 10:00:00', 'obs-p1-weight');
+-- A different user who already has the username 'clerk'.
+INSERT INTO person VALUES (4, 'M', NULL, 1, '2021-03-03 00:00:00', 0, 'person-other-clerk');
+INSERT INTO users VALUES (2, 'clerk', 'clerk', 4, 1, '2021-03-03 00:00:00', 0, 'user-other-clerk');
 SET FOREIGN_KEY_CHECKS = 1;

@@ -32,4 +32,11 @@ INSERT INTO obs VALUES (4, 2, 1, 1, NULL, '2022-04-04 11:00:00', 72, 'follow-up,
 -- An obs on a concept the target does not have (blocked), and a child that depends on it (blocked too).
 INSERT INTO obs VALUES (5, 2, 3, 1, NULL, '2022-05-05 12:00:00', 165, NULL, 1, '2022-05-05 12:00:00', 'obs-p1-height');
 INSERT INTO obs VALUES (6, 2, 1, 1, 5, '2022-05-05 12:00:00', 71, NULL, 1, '2022-05-05 12:00:00', 'obs-p1-child-of-height');
+-- A patient registered by a new user whose username is taken by a different user in the target: copying that
+-- user fails, so this patient fails as a whole and must leave nothing behind, without stopping the others.
+INSERT INTO person VALUES (5, 'F', NULL, 1, '2022-06-06 08:00:00', 0, 'person-clerk');
+INSERT INTO users VALUES (3, 'clerk', 'clerk', 5, 1, '2022-06-06 08:00:00', 0, 'user-clerk');
+INSERT INTO person VALUES (6, 'M', '1999-09-09', 3, '2022-06-06 09:00:00', 0, 'person-p3');
+INSERT INTO patient VALUES (6, 3, '2022-06-06 09:00:00', 0);
+INSERT INTO person_name VALUES (3, 6, 'Kibet', 'Rotich', 3, '2022-06-06 09:00:00', 'name-p3');
 SET FOREIGN_KEY_CHECKS = 1;

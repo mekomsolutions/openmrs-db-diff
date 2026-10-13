@@ -1,8 +1,7 @@
 -- A cut-down OpenMRS-shaped schema covering the cases the sync has to handle:
 -- person/users foreign-key cycle, patient (no uuid, primary key = person id), obs groups (self reference),
 -- drug_order (no uuid, primary key = orders id), user_role (no uuid, composite key) and excluded metadata.
-SET
-FOREIGN_KEY_CHECKS = 0;
+SET FOREIGN_KEY_CHECKS = 0;
 CREATE TABLE person
 (
     person_id    INT AUTO_INCREMENT PRIMARY KEY,
@@ -134,5 +133,4 @@ CREATE TABLE drug_order
     dose DOUBLE,
     FOREIGN KEY (order_id) REFERENCES orders (order_id)
 ) ENGINE=InnoDB;
-SET
-FOREIGN_KEY_CHECKS = 1;
+SET FOREIGN_KEY_CHECKS = 1;
