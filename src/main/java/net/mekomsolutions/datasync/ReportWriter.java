@@ -1,95 +1,109 @@
 package net.mekomsolutions.datasync;
 
 import java.io.IOException;
-import java.io.Writer;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import net.mekomsolutions.datasync.MissingRowFinder.MissingRow;
-import net.mekomsolutions.datasync.MissingRowFinder.TableDiff;
-import net.mekomsolutions.datasync.SyncPlanner.BlockedRow;
-import net.mekomsolutions.datasync.SyncPlanner.Plan;
+import java.util.TreeMap;
 
 /**
- * Writes the report:
+ * Writes a run's report into one folder, a patient at a time, so memory does not grow with the number of patients:
+ *
  * <ul>
- *   <li>summary.csv: per table, rows in the source, rows missing from the target, how many can be synced</li>
- *   <li>missing/&lt;table&gt;.csv: every missing row as it is in the source database</li>
+ *   <li>patients.csv: one line per patient with its status and counts</li>
+ *   <li>missing/&lt;table&gt;.csv: every missing row as it is in the source, with the patient it was found for
+ *       and whether it can be synced</li>
  *   <li>blocked.csv: missing rows that cannot be synced, with the reason</li>
+ *   <li>summary.csv: per table totals, written when the report is closed</li>
  * </ul>
  */
-final class ReportWriter {
+final class ReportWriter implements AutoCloseable {
 
-    private ReportWriter() {}
+    private final Path dir;
+    private final CsvWriter patients;
+    private final CsvWriter blocked;
+    private final Map<String, CsvWriter> missingByTable = new HashMap<>();
+    private final Map<String, TableTotals> totals = new TreeMap<>();
 
-    static void write(Path dir, List<TableDiff> diffs, Plan plan) throws IOException {
+    ReportWriter(Path dir) throws IOException {
+        this.dir = Files.createDirectories(dir);
         Files.createDirectories(dir.resolve("missing"));
+        this.patients = new CsvWriter(dir.resolve("patients.csv"), List.of("patient_uuid", "status", "source_rows",
+                "missing_in_target", "syncable", "blocked", "inserted", "error"));
+        this.blocked = new CsvWriter(dir.resolve("blocked.csv"), List.of("patient_uuid", "table", "row", "reason"));
+    }
 
-        Map<String, Integer> blockedPerTable = new HashMap<>();
-        for (BlockedRow b : plan.blocked()) {
-            blockedPerTable.merge(b.table().name(), 1, Integer::sum);
+    Path dir() {
+        return dir;
+    }
+
+    void add(PatientResult result) throws IOException {
+        String patient = result.patientUuid();
+        patients.row(List.of(patient, result.status().name(), String.valueOf(result.sourceRows()),
+                String.valueOf(result.missing()), String.valueOf(result.syncable()), String.valueOf(result.blocked()),
+                String.valueOf(result.insertedTotal()), result.error() == null ? "" : result.error()));
+
+        if (result.record() != null) {
+            result.record().rows().forEach((table, rows) -> totals(table.name()).sourceRows += rows.size());
         }
-
-        try (Writer w = Files.newBufferedWriter(dir.resolve("summary.csv"), StandardCharsets.UTF_8)) {
-            line(w, List.of("table", "source_rows", "missing_in_target", "syncable", "blocked"));
-            for (TableDiff d : diffs) {
-                int syncable = plan.rows().getOrDefault(d.table(), List.of()).size();
-                line(w, List.of(d.table().name(), String.valueOf(d.sourceRows()), String.valueOf(d.missing().size()),
-                        String.valueOf(syncable), String.valueOf(blockedPerTable.getOrDefault(d.table().name(), 0))));
-            }
-        }
-
-        for (TableDiff d : diffs) {
-            if (d.missing().isEmpty()) {
-                continue;
-            }
-            List<String> header = new ArrayList<>();
-            d.table().columns().forEach(c -> header.add(c.name()));
-            try (Writer w = Files.newBufferedWriter(dir.resolve("missing").resolve(d.table().name() + ".csv"),
-                    StandardCharsets.UTF_8)) {
-                line(w, header);
-                for (MissingRow r : d.missing()) {
-                    List<String> cells = new ArrayList<>();
-                    for (String col : header) {
-                        cells.add(Db.key(r.values().get(col)));
-                    }
-                    line(w, cells);
+        if (result.plan() != null) {
+            for (List<SyncPlan.PlannedRow> rows : result.plan().rows().values()) {
+                for (SyncPlan.PlannedRow row : rows) {
+                    writeMissing(patient, "syncable", row.table(), row.row());
+                    totals(row.table().name()).syncable++;
                 }
             }
+            for (SyncPlan.BlockedRow row : result.plan().blocked()) {
+                writeMissing(patient, "blocked", row.table(), row.row());
+                blocked.row(List.of(patient, row.table().name(), row.row().describe(), row.reason()));
+                totals(row.table().name()).blocked++;
+            }
         }
+        result.inserted().forEach((table, n) -> totals(table).inserted += n);
+    }
 
-        try (Writer w = Files.newBufferedWriter(dir.resolve("blocked.csv"), StandardCharsets.UTF_8)) {
-            line(w, List.of("table", "row", "reason"));
-            for (BlockedRow b : plan.blocked()) {
-                Object uuid = b.row().values().get("uuid");
-                line(w, List.of(b.table().name(), uuid != null ? uuid.toString()
-                        : b.row().identity().replace('\u001F', '/'), b.reason()));
+    private void writeMissing(String patient, String status, Schema.Table table, SourceRow row) throws IOException {
+        CsvWriter out = missingByTable.get(table.name());
+        if (out == null) {
+            List<String> header = new ArrayList<>(List.of("patient_uuid", "sync_status"));
+            table.columns().forEach(c -> header.add(c.name()));
+            out = new CsvWriter(dir.resolve("missing").resolve(table.name() + ".csv"), header);
+            missingByTable.put(table.name(), out);
+        }
+        List<String> cells = new ArrayList<>(List.of(patient, status));
+        table.columns().forEach(c -> cells.add(Db.key(row.values().get(c.name()))));
+        out.row(cells);
+    }
+
+    @Override
+    public void close() throws IOException {
+        try (CsvWriter summary = new CsvWriter(dir.resolve("summary.csv"),
+                List.of("table", "source_rows", "missing_in_target", "syncable", "blocked", "inserted"))) {
+            for (Map.Entry<String, TableTotals> e : totals.entrySet()) {
+                TableTotals t = e.getValue();
+                summary.row(List.of(e.getKey(), String.valueOf(t.sourceRows), String.valueOf(t.syncable + t.blocked),
+                        String.valueOf(t.syncable), String.valueOf(t.blocked), String.valueOf(t.inserted)));
+            }
+        } finally {
+            patients.close();
+            blocked.close();
+            for (CsvWriter out : missingByTable.values()) {
+                out.close();
             }
         }
     }
 
-    private static void line(Writer w, List<String> cells) throws IOException {
-        for (int i = 0; i < cells.size(); i++) {
-            if (i > 0) {
-                w.write(',');
-            }
-            w.write(csv(cells.get(i)));
-        }
-        w.write('\n');
+    private TableTotals totals(String table) {
+        return totals.computeIfAbsent(table, t -> new TableTotals());
     }
 
-    private static String csv(String s) {
-        if (s == null) {
-            return "";
-        }
-        if (s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r")) {
-            return "\"" + s.replace("\"", "\"\"") + "\"";
-        }
-        return s;
+    private static final class TableTotals {
+        long sourceRows;
+        long syncable;
+        long blocked;
+        long inserted;
     }
 }
