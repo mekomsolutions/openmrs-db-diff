@@ -39,7 +39,7 @@ final class TableLinks {
             }
             for (Schema.ForeignKey fk : child.foreignKeys()) {
                 Link link = new Link(child, fk);
-                if (!SHARED_TABLES.contains(child.name())) {
+                if (!SHARED_TABLES.contains(child.name()) && !SHARED_TABLES.contains(fk.refTable())) {
                     ownedBy.computeIfAbsent(fk.refTable(), k -> new ArrayList<>()).add(link);
                 }
                 if (child.primaryKey().contains(fk.column())) {
