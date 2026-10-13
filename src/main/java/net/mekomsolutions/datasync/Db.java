@@ -1,13 +1,16 @@
 package net.mekomsolutions.datasync;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
-/** Small JDBC helpers shared by the diff and the sync. */
+/** Small JDBC helpers shared by the lookups, the reads and the sync. */
 final class Db {
 
     /** Largest IN (...) list sent in one query. */
@@ -33,6 +36,15 @@ final class Db {
         return rs.getObject(index);
     }
 
+    /** Reads every column of {@code table} from the current row, keyed by column name in table order. */
+    static Map<String, Object> readRow(ResultSet rs, Schema.Table table) throws SQLException {
+        Map<String, Object> row = new LinkedHashMap<>();
+        for (Schema.Column column : table.columns()) {
+            row.put(column.name(), read(rs, rs.findColumn(column.name()), column));
+        }
+        return row;
+    }
+
     /** Stable text form of a value, used as a cache and comparison key. */
     static String key(Object value) {
         if (value == null) {
@@ -52,13 +64,15 @@ final class Db {
     }
 
     static String placeholders(int n) {
-        return String.join(",", java.util.Collections.nCopies(n, "?"));
+        return String.join(",", Collections.nCopies(n, "?"));
     }
 
-    /** A forward-only statement that streams rows instead of buffering the whole result in memory. */
-    static PreparedStatement streaming(Connection conn, String sql) throws SQLException {
-        PreparedStatement ps = conn.prepareStatement(sql, ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-        ps.setFetchSize(Integer.MIN_VALUE);
-        return ps;
+    /** Splits {@code items} into consecutive chunks of at most {@link #BATCH} elements. */
+    static <T> List<List<T>> batches(List<T> items) {
+        List<List<T>> batches = new ArrayList<>();
+        for (int i = 0; i < items.size(); i += BATCH) {
+            batches.add(items.subList(i, Math.min(items.size(), i + BATCH)));
+        }
+        return batches;
     }
 }
