@@ -42,7 +42,8 @@ record PatientResult(String patientUuid, Status status, PatientRecord record, Sy
     /** A failure after planning: the record and plan still go into the report. */
     static PatientResult failed(String patientUuid, PatientRecord record, SyncPlan plan, Exception e) {
         String message = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
-        return new PatientResult(patientUuid, Status.FAILED, record, plan, Map.of(), message);
+        String oneLine = message.replaceAll("\\s*\\R\\s*", " ").strip(); // one log line, one CSV line
+        return new PatientResult(patientUuid, Status.FAILED, record, plan, Map.of(), oneLine);
     }
 
     int sourceRows() {
