@@ -4,11 +4,11 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>net.mekomsolutions.datasync</groupId>
-    <artifactId>openmrs-data-sync</artifactId>
+    <groupId>net.mekomsolutions.dbdiff</groupId>
+    <artifactId>openmrs-db-diff</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
-    <name>OpenMRS Data Sync</name>
+    <name>OpenMRS DB Diff</name>
     <description>Finds patient data present in one OpenMRS database but missing from another, and copies it across.</description>
 
     <properties>
@@ -55,11 +55,11 @@
                         <phase>package</phase>
                         <goals><goal>shade</goal></goals>
                         <configuration>
-                            <finalName>openmrs-data-sync</finalName>
+                            <finalName>openmrs-db-diff</finalName>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>net.mekomsolutions.datasync.Main</mainClass>
+                                    <mainClass>net.mekomsolutions.dbdiff.Main</mainClass>
                                 </transformer>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>

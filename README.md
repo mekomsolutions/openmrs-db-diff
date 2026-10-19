@@ -1,4 +1,4 @@
-# openmrs-data-sync
+# openmrs-db-diff
 
 Finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it
 across, one patient at a time.
@@ -53,7 +53,7 @@ Requires Java 17+ and Maven.
 mvn clean package
 ```
 
-This produces `target/openmrs-data-sync.jar`.
+This produces `target/openmrs-db-diff.jar`.
 
 ## Configure
 
@@ -74,17 +74,17 @@ Docker network and use the container names as hosts (`jdbc:mysql://<container na
 
 ```bash
 # 1. Report only (read-only on both databases)
-java -jar target/openmrs-data-sync.jar report
+java -jar target/openmrs-db-diff.jar report
 
 # 2. Dry run: performs every patient's inserts inside a transaction, then rolls back
-java -jar target/openmrs-data-sync.jar sync
+java -jar target/openmrs-db-diff.jar sync
 
 # 3. Back up the target first, then apply (asks you to type APPLY)
 docker exec <container name> sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction openmrs' > backup.sql
-java -jar target/openmrs-data-sync.jar sync --apply
+java -jar target/openmrs-db-diff.jar sync --apply
 
 # 4. Confirm: only blocked rows should remain
-java -jar target/openmrs-data-sync.jar report
+java -jar target/openmrs-db-diff.jar report
 ```
 
 ### Choosing patients
@@ -93,10 +93,10 @@ Without patient options, every patient in the source is processed, in `patient_i
 
 ```bash
 # One or more patients (person uuids), comma-separated or repeated
-java -jar target/openmrs-data-sync.jar sync --patient 0b2e...,7f41... --patient 9c3d...
+java -jar target/openmrs-db-diff.jar sync --patient 0b2e...,7f41... --patient 9c3d...
 
 # A file with one uuid per line; blank lines and anything after # are ignored
-java -jar target/openmrs-data-sync.jar sync --patients-file patients.txt
+java -jar target/openmrs-db-diff.jar sync --patients-file patients.txt
 ```
 
 Both options can be combined. A good way to start is a report on all patients, then a dry run and apply on a

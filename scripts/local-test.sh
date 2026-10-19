@@ -4,8 +4,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SRC=data-sync-test-source
-TGT=data-sync-test-target
+SRC=db-diff-test-source
+TGT=db-diff-test-target
 F=src/test/resources/fixtures
 WORK=$(mktemp -d)
 
@@ -37,7 +37,7 @@ excludedTablesFile=excluded-tables.txt
 outputDir=$WORK/output
 PROPS
 
-JAR="java -jar target/openmrs-data-sync.jar --config $WORK/sync.properties"
+JAR="java -jar target/openmrs-db-diff.jar --config $WORK/sync.properties"
 latest() { ls -d "$WORK"/output/*/ | sort | tail -1; }
 run() { sleep 1; $JAR "$@"; }  # one second apart, so every run gets its own report folder
 
