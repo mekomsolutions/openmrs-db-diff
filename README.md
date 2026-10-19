@@ -1,7 +1,6 @@
 # openmrs-db-diff
 
-Finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it
-across, one patient at a time.
+A tool that finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it across, one patient at a time.
 
 - **source**: the database with the extra data
 - **target**: the source of truth that receives the missing rows
