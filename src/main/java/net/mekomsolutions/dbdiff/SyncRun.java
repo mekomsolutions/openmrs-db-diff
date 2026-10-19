@@ -50,7 +50,14 @@ final class SyncRun {
             Schema source = schemaReader.read(db.source());
             Schema target = schemaReader.read(db.targetRead());
             warnAboutTablesMissingFromTarget(source, target);
-            PatientSyncer syncer = PatientSyncer.create(db, source, target, config, options.mode());
+            if (options.mode() == RunMode.METADATA) {
+                return checkMetadata(db, source, target);
+            }
+            MetadataDecisions decisions = MetadataDecisions.load(config.metadataDecisionsFile());
+            if (!decisions.isEmpty()) {
+                Log.info("Using the metadata decisions in " + config.metadataDecisionsFile());
+            }
+            PatientSyncer syncer = PatientSyncer.create(db, source, target, config, decisions, options.mode());
 
             List<String> patients = PatientList.resolve(options, db.source());
             Log.info(describeMode() + " for " + patients.size() + " patient(s)");
@@ -63,6 +70,7 @@ final class SyncRun {
             }
 
             Map<Status, Integer> tally = new EnumMap<>(Status.class);
+            long blockedRows = 0;
             Path reportDir;
             try (ReportWriter report = new ReportWriter(newReportDir())) {
                 reportDir = report.dir();
@@ -70,6 +78,7 @@ final class SyncRun {
                     PatientResult result = syncOne(syncer, patients.get(i));
                     report.add(result);
                     tally.merge(result.status(), 1, Integer::sum);
+                    blockedRows += result.blocked();
                     logProgress(i + 1, patients.size(), result);
                     if (result.status() == Status.FAILED && !db.allValid()) {
                         throw new SQLException("Lost a database connection after " + (i + 1) + " of "
@@ -78,8 +87,35 @@ final class SyncRun {
                 }
             }
             logSummary(tally, reportDir);
+            if (blockedRows > 0) {
+                Log.info(blockedRows + " missing row(s) are blocked; see blocked.csv. When they point at metadata the"
+                        + " target lacks, run the metadata command to reconcile it first.");
+            }
             return tally.containsKey(Status.FAILED) ? 1 : 0;
         }
+    }
+
+    /** Compares metadata, writes metadata.csv and the suggested decisions, and says what to do next. */
+    private int checkMetadata(Databases db, Schema source, Schema target) throws SQLException, IOException {
+        Log.info("Comparing metadata");
+        List<MetadataCheck.Finding> findings =
+                new MetadataCheck(db.source(), db.targetRead(), source, target, config).run();
+        Path dir = newReportDir();
+        MetadataCheck.write(dir, findings);
+        MetadataCheck.totals(findings).forEach((table, t) ->
+                Log.info(String.format("%-32s missing from the target %6d, used by patient data %6d", table, t[0], t[1])));
+        long needed = findings.stream().filter(MetadataCheck.Finding::needed).count();
+        Path decisionsFile = config.metadataDecisionsFile() != null ? config.metadataDecisionsFile()
+                : Path.of("config", "metadata-decisions.csv");
+        Log.info("Report written to " + dir.toAbsolutePath());
+        if (needed == 0) {
+            Log.info("The target has all the metadata patient data uses.");
+        } else {
+            Log.info(needed + " metadata row(s) used by patient data are missing from the target. Review "
+                    + dir.resolve("metadata-decisions.csv") + " (MAP to an existing target row, COPY, or SKIP), then"
+                    + " save it as " + decisionsFile + " and run a dry run.");
+        }
+        return 0;
     }
 
     private void warnAboutTablesMissingFromTarget(Schema source, Schema target) {
@@ -102,6 +138,7 @@ final class SyncRun {
             case REPORT -> "Report";
             case DRY_RUN -> "Dry run (every insert is rolled back)";
             case APPLY -> "Sync, committing patient by patient";
+            case METADATA -> "Metadata check";
         };
     }
 

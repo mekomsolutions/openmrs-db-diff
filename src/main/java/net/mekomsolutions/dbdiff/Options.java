@@ -15,6 +15,7 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
 
     static final String USAGE = """
             Usage:
+              java -jar openmrs-db-diff.jar metadata      [options]   find metadata the target lacks, suggest decisions
               java -jar openmrs-db-diff.jar report        [options]   find missing rows, write the report
               java -jar openmrs-db-diff.jar sync          [options]   dry run: insert, then roll back
               java -jar openmrs-db-diff.jar sync --apply  [options]   insert and commit, patient by patient
@@ -26,6 +27,7 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
               --yes                          with --apply, skip the confirmation prompt
 
             Without --patient or --patients-file, every patient in the source database is processed.
+            Run metadata first: report and sync copy or map missing metadata only as config/metadata-decisions.csv says.
             """;
 
     /** Parses the arguments, or throws {@link IllegalArgumentException} saying what is wrong with them. */
@@ -39,9 +41,9 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
-                case "report", "sync" -> {
+                case "metadata", "report", "sync" -> {
                     if (command != null) {
-                        throw new IllegalArgumentException("Give only one command, report or sync");
+                        throw new IllegalArgumentException("Give only one command: metadata, report or sync");
                     }
                     command = arg;
                 }
@@ -60,12 +62,19 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
             }
         }
         if (command == null) {
-            throw new IllegalArgumentException("Missing command: report or sync");
+            throw new IllegalArgumentException("Missing command: metadata, report or sync");
+        }
+        if (command.equals("metadata") && (!patients.isEmpty() || patientsFile != null)) {
+            throw new IllegalArgumentException("metadata compares all metadata; it takes no patients");
         }
         if (apply && !command.equals("sync")) {
             throw new IllegalArgumentException("--apply only goes with sync");
         }
-        RunMode mode = command.equals("report") ? RunMode.REPORT : apply ? RunMode.APPLY : RunMode.DRY_RUN;
+        RunMode mode = switch (command) {
+            case "metadata" -> RunMode.METADATA;
+            case "report" -> RunMode.REPORT;
+            default -> apply ? RunMode.APPLY : RunMode.DRY_RUN;
+        };
         return new Options(mode, config, List.copyOf(patients), patientsFile, yes);
     }
 

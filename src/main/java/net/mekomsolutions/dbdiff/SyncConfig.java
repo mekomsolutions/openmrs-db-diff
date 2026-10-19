@@ -13,8 +13,21 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 
-/** Settings read from a properties file (see config/sync.properties.example). */
-record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir) {
+/**
+ * Settings read from a properties file (see config/sync.properties.example).
+ *
+ * @param metadataTables the excluded tables that hold metadata (concepts, locations, attribute types, ...), as
+ *                       opposed to logs, event queues and the like; only these are compared by the metadata check
+ *                       and can be mapped or copied
+ * @param metadataDecisionsFile reviewed decisions for metadata the target lacks (see {@link MetadataDecisions});
+ *                              may not exist, or be null
+ */
+record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir,
+                  Set<String> metadataTables, Path metadataDecisionsFile) {
+
+    SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir) {
+        this(source, target, excludedTables, outputDir, Set.of(), null);
+    }
 
     record DbSettings(String label, String url, String user, String password) {
         Connection connect() throws SQLException {
@@ -28,16 +41,24 @@ record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTabl
             p.load(r);
         }
         Path base = file.toAbsolutePath().getParent();
-        Path excludedFile = base.resolve(p.getProperty("excludedTablesFile", "excluded-tables.txt"));
-        Set<String> excluded = new TreeSet<>();
-        for (String line : Files.readAllLines(excludedFile, StandardCharsets.UTF_8)) {
+        Set<String> excluded = tableList(base.resolve(p.getProperty("excludedTablesFile", "excluded-tables.txt")));
+        Path metadataFile = base.resolve(p.getProperty("metadataTablesFile", "metadata-tables.txt"));
+        Set<String> metadata = Files.exists(metadataFile) ? tableList(metadataFile) : Set.of();
+        return new SyncConfig(db(p, "source"), db(p, "target"), excluded,
+                Path.of(p.getProperty("outputDir", "output")), metadata,
+                base.resolve(p.getProperty("metadataDecisionsFile", "metadata-decisions.csv")));
+    }
+
+    /** Table names, one per line; blank lines and lines starting with # are ignored. */
+    private static Set<String> tableList(Path file) throws IOException {
+        Set<String> tables = new TreeSet<>();
+        for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
             String t = line.replace("\"", "").trim();
             if (!t.isEmpty() && !t.startsWith("#")) {
-                excluded.add(t.toLowerCase(Locale.ROOT));
+                tables.add(t.toLowerCase(Locale.ROOT));
             }
         }
-        return new SyncConfig(db(p, "source"), db(p, "target"), excluded,
-                Path.of(p.getProperty("outputDir", "output")));
+        return tables;
     }
 
     private static DbSettings db(Properties p, String prefix) {
@@ -51,5 +72,10 @@ record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTabl
 
     boolean isExcluded(String table) {
         return excludedTables.contains(table.toLowerCase(Locale.ROOT));
+    }
+
+    /** Whether {@code table} is metadata: listed as such, and excluded from the patient-by-patient sync. */
+    boolean isMetadata(String table) {
+        return metadataTables.contains(table.toLowerCase(Locale.ROOT)) && isExcluded(table);
     }
 }

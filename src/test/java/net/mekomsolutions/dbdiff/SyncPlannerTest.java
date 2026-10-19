@@ -23,7 +23,7 @@ class SyncPlannerTest {
             Map<String, String> reasons = plan.blocked().stream()
                     .collect(Collectors.toMap(b -> b.row().describe().trim(), SyncPlan.BlockedRow::reason));
             assertTrue(reasons.get("obs-p1-height").startsWith("concept_id points at concept"));
-            assertTrue(reasons.get("obs-p1-height").contains("not synced"));
+            assertTrue(reasons.get("obs-p1-height").contains("metadata decisions"));
             assertTrue(reasons.get("obs-p1-child-of-height").startsWith("obs_group_id depends on obs"));
         }
     }

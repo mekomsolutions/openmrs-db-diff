@@ -12,6 +12,7 @@ final class SyncFixture implements AutoCloseable {
 
     /** Metadata tables, as in src/test/resources/fixtures/excluded-tables.txt. */
     static final Set<String> EXCLUDED = Set.of("concept", "location", "encounter_type", "role");
+    static final Set<String> METADATA = EXCLUDED;
 
     final TestDatabase source;
     final TestDatabase target;
@@ -23,7 +24,8 @@ final class SyncFixture implements AutoCloseable {
     SyncFixture(Path outputDir) throws SQLException {
         source = TestDatabase.withFixtures("data-source.sql");
         target = TestDatabase.withFixtures("data-target.sql");
-        config = new SyncConfig(settings("source", source), settings("target", target), EXCLUDED, outputDir);
+        config = new SyncConfig(settings("source", source), settings("target", target), EXCLUDED, outputDir, METADATA,
+                null);
         databases = Databases.open(config);
         sourceSchema = source.schema();
         targetSchema = target.schema();

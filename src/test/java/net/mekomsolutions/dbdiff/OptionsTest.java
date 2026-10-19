@@ -48,6 +48,13 @@ class OptionsTest {
     }
 
     @Test
+    void metadataComparesEveryMetadataRowAndTakesNoPatients() {
+        assertEquals(RunMode.METADATA, Options.parse("metadata").mode());
+        assertThrows(IllegalArgumentException.class, () -> Options.parse("metadata", "--patient", "p1"));
+        assertThrows(IllegalArgumentException.class, () -> Options.parse("metadata", "--apply"));
+    }
+
+    @Test
     void rejectsBadArguments() {
         assertThrows(IllegalArgumentException.class, Options::parse);
         assertThrows(IllegalArgumentException.class, () -> Options.parse("report", "--apply"));

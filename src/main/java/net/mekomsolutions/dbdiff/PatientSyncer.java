@@ -30,7 +30,13 @@ final class PatientSyncer {
 
     /** A syncer wired to the run's connections, where every lookup cache is shared across patients. */
     static PatientSyncer create(Databases db, Schema source, Schema target, SyncConfig config, RunMode mode) {
-        SyncScope scope = new SyncScope(target, config);
+        return create(db, source, target, config, MetadataDecisions.none(), mode);
+    }
+
+    /** As {@link #create(Databases, Schema, Schema, SyncConfig, RunMode)}, honouring the metadata decisions. */
+    static PatientSyncer create(Databases db, Schema source, Schema target, SyncConfig config,
+                                MetadataDecisions decisions, RunMode mode) {
+        SyncScope scope = new SyncScope(target, config, decisions);
         TableLinks links = new TableLinks(source, scope);
         IdentityResolver resolver = new IdentityResolver(source, db.source(), db.targetRead());
         SourceReader reader = new SourceReader(db.source(), resolver);

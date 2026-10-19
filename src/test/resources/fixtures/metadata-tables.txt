@@ -1,0 +1,4 @@
+concept
+location
+encounter_type
+role

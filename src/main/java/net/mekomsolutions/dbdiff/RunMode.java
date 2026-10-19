@@ -7,5 +7,7 @@ enum RunMode {
     /** Insert each patient's rows inside a transaction, then roll it back. */
     DRY_RUN,
     /** Insert each patient's rows and commit, one transaction per patient. */
-    APPLY
+    APPLY,
+    /** Compare metadata only, and suggest what to do with metadata the target lacks. Nothing is written. */
+    METADATA
 }

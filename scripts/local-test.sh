@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end self-test on two throwaway MySQL containers (never touches h4 or h9).
-# Loads a small OpenMRS-shaped schema, runs report, dry run and apply, then checks the remapped ids.
+# Loads a small OpenMRS-shaped schema, runs report, dry run and apply, then checks the remapped ids. Last, it
+# reconciles the metadata the target lacks and checks the rows it blocked go through.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -25,7 +26,7 @@ for c in "$SRC" "$TGT"; do docker exec -i "$c" mysql -uroot -proot openmrs < "$F
 docker exec -i "$SRC" mysql -uroot -proot openmrs < "$F/data-source.sql" 2>/dev/null
 docker exec -i "$TGT" mysql -uroot -proot openmrs < "$F/data-target.sql" 2>/dev/null
 
-cp "$F/excluded-tables.txt" "$WORK/"
+cp "$F/excluded-tables.txt" "$F/metadata-tables.txt" "$WORK/"
 cat > "$WORK/sync.properties" <<PROPS
 source.url=jdbc:mysql://127.0.0.1:33071/openmrs?useSSL=false&allowPublicKeyRetrieval=true
 source.user=root
@@ -69,4 +70,13 @@ csv_check "named patients only" "$(cut -d, -f1,2 "$NAMED_REPORT/patients.csv" | 
 csv_check "failure does not stop the run" "$(cut -d, -f1,2 "$FIRST_APPLY/patients.csv" | tail -n +2 | tr '\n' ' ')" "person-p3,FAILED person-p1,SYNCED person-p2,SYNCED "
 check "failed patient left nothing behind" "SELECT COUNT(*) FROM person WHERE uuid IN ('person-p3','person-clerk')" "0"
 csv_check "second apply inserts nothing" "$(tail -n +2 "$SECOND_APPLY/patients.csv" | cut -d, -f7 | sort -u | tr '\n' ' ')" "0 "
+
+# Reconcile metadata: the check suggests copying the concept the target lacks; with that decision in the config
+# folder, the blocked obs go through.
+run metadata
+csv_check "metadata check suggests copying the missing concept" "$(tail -n +2 "$(latest)/metadata-decisions.csv")" "concept,concept-height-source-only,,COPY,"
+cp "$(latest)/metadata-decisions.csv" "$WORK/"
+run sync --apply --yes --patient person-p1
+check "obs on the copied concept synced" "SELECT c.uuid FROM obs o JOIN concept c ON c.concept_id=o.concept_id WHERE o.uuid='obs-p1-height'" "concept-height-source-only"
+check "its child obs synced too" "SELECT COUNT(*) FROM obs WHERE uuid='obs-p1-child-of-height'" "1"
 exit $FAILED

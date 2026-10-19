@@ -60,6 +60,18 @@ class SyncRunTest {
         }
     }
 
+    @Test
+    void metadataCommandWritesTheFindingsAndSuggestedDecisionsOnly() throws Exception {
+        try (SyncFixture f = new SyncFixture(dir)) {
+            int exit = run(f, "metadata");
+
+            assertEquals(0, exit);
+            assertEquals(List.of("table,source_uuid,name,action,target_uuid", "concept,concept-height-source-only,,COPY,"),
+                    lines("metadata-decisions.csv"));
+            assertEquals(1, f.target.count("obs"));
+        }
+    }
+
     private int run(SyncFixture f, String... args) throws Exception {
         return new SyncRun(Options.parse(args), f.config, connection -> connection == f.databases.source()
                 ? f.sourceSchema : f.targetSchema).execute();
@@ -69,7 +81,7 @@ class SyncRunTest {
     private List<String> lines(String file) throws Exception {
         Path output = Files.isDirectory(dir.resolve("output")) ? dir.resolve("output") : dir;
         try (Stream<Path> runs = Files.list(output)) {
-            Path report = runs.filter(p -> Files.exists(p.resolve("patients.csv"))).findFirst().orElseThrow();
+            Path report = runs.filter(p -> Files.exists(p.resolve(file))).findFirst().orElseThrow();
             return Files.readAllLines(report.resolve(file)).stream().map(String::stripTrailing).toList();
         }
     }

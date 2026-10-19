@@ -18,5 +18,13 @@ target.password=openmrs
 # Relative to this file.
 excludedTablesFile=excluded-tables.txt
 
+# Excluded tables that hold metadata (concepts, locations, attribute types, ...), relative to this file. Only these are
+# compared by the metadata command and can be mapped or copied.
+metadataTablesFile=metadata-tables.txt
+
+# Reviewed decisions for metadata the target lacks (MAP, COPY or SKIP), relative to this file. The metadata command
+# suggests one; the file is optional.
+metadataDecisionsFile=metadata-decisions.csv
+
 # Each run writes a timestamped folder here (relative to where you run the jar).
 outputDir=output

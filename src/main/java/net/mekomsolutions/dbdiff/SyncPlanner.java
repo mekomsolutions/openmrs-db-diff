@@ -78,7 +78,8 @@ final class SyncPlanner {
                                 + " row that does not exist in the source database";
                         break;
                     }
-                    refs.put(fk.column(), new Ref(fk, refTable, value, refIdentity));
+                    refs.put(fk.column(), new Ref(fk, refTable, value,
+                            scope.decisions().targetIdentity(refTable, refIdentity)));
                 }
                 if (problem != null) {
                     draft.block(new BlockedRow(table, row, problem));
@@ -102,7 +103,8 @@ final class SyncPlanner {
         Map<Schema.Table, Map<String, Set<Object>>> wanted = new LinkedHashMap<>();
         for (PlannedRow row : added) {
             for (Ref ref : row.refs().values()) {
-                if (scope.includes(ref.refTable()) && !draft.contains(ref.refTable(), ref.refIdentity())
+                if (scope.canPullIn(ref.refTable(), ref.refIdentity())
+                        && !draft.contains(ref.refTable(), ref.refIdentity())
                         && !inTarget(ref)) {
                     wanted.computeIfAbsent(ref.refTable(), t -> new LinkedHashMap<>())
                             .computeIfAbsent(ref.fk().refColumn(), c -> new LinkedHashSet<>())
@@ -190,8 +192,13 @@ final class SyncPlanner {
             if (draft.isBlocked(ref.refTable(), ref.refIdentity())) {
                 return ref.fk().column() + " depends on " + parent + ", which cannot be synced";
             }
+            if (scope.decisions().isMapTarget(ref.refTable(), ref.refIdentity())) {
+                return ref.fk().column() + " is mapped to " + parent + " in the metadata decisions, but the target"
+                        + " has no such row";
+            }
             return ref.fk().column() + " points at " + parent + ", which is missing from the target"
-                    + (scope.includes(ref.refTable()) ? "" : " and that table is not synced (excluded or metadata)");
+                    + (scope.canPullIn(ref.refTable(), ref.refIdentity()) ? ""
+                    : ". It is metadata: run the metadata command, then MAP or COPY it in the metadata decisions");
         }
         return null;
     }

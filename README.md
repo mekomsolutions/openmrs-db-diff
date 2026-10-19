@@ -10,6 +10,9 @@ Every table is in scope except those listed in `config/excluded-tables.txt` (met
 
 ## How it works
 
+Before the patients, reconcile the metadata (see [Reconciling metadata](#reconciling-metadata)): rows can only be
+copied when the concepts, locations, attribute types and other metadata they point at are in the target.
+
 The tool takes a list of patients (person uuids) and runs each one through the same steps. A patient that fails
 is reported and nothing is written for it; the run carries on with the next one.
 
@@ -22,8 +25,9 @@ is reported and nothing is written for it; the run carries on with the next one.
 3. **Plan.** A missing row can be copied when every foreign key it holds points at a row that is already in the
    target (matched by uuid) or is copied with it. Rows the patient's data points at that the target lacks, such
    as the user who registered the patient, are pulled in from the source and copied too, together with the rows
-   that extend them (`user_role` for a user, `patient` for a person). Anything else is *blocked* with a reason,
-   for example an obs on a concept the target does not have. Rows that depend on a blocked row are blocked too.
+   that extend them (`user_role` for a user, `patient` for a person). Missing metadata is mapped or copied as the
+   metadata decisions say. Anything else is *blocked* with a reason, for example an obs on a concept the target
+   does not have. Rows that depend on a blocked row are blocked too.
 4. **Sync.** Rows are inserted parents first. Auto-increment ids are assigned by the target, and every foreign
    key (person_id, encounter_id, concept_id, creator, obs_group_id, ...) is rewritten to the target's id for the
    same uuid. Foreign-key cycles (person ↔ users) and obs groups are handled with a temporary value that is fixed
@@ -42,7 +46,9 @@ is reported and nothing is written for it; the run carries on with the next one.
 | `SyncPlanner`, `SyncPlan`, `TableOrder` | What can be copied, what is blocked and why, and in which table order |
 | `SyncExecutor` | Inserts a plan in one transaction, remapping ids; rolls back on dry run or error |
 | `IdentityResolver` | Matches rows across the two databases and caches the lookups |
-| `ReportWriter`, `CsvWriter` | The CSV report, written patient by patient |
+| `MetadataCheck` | The `metadata` command: metadata the target lacks, what uses it, and suggested decisions |
+| `MetadataDecisions` | The reviewed decisions (MAP, COPY or SKIP) that report and sync follow for missing metadata |
+| `ReportWriter`, `CsvWriter`, `CsvReader` | The CSV report, written patient by patient, and reading the decisions |
 | `Databases`, `Schema`, `SyncScope`, `SyncConfig`, `SourceReader`, `Db`, `Log` | Plumbing |
 
 ## Build
@@ -73,6 +79,9 @@ Docker network and use the container names as hosts (`jdbc:mysql://<container na
 ## Run
 
 ```bash
+# 0. Metadata the target lacks, and suggested decisions (read-only); see "Reconciling metadata"
+java -jar target/openmrs-db-diff.jar metadata
+
 # 1. Report only (read-only on both databases)
 java -jar target/openmrs-db-diff.jar report
 
@@ -86,6 +95,43 @@ java -jar target/openmrs-db-diff.jar sync --apply
 # 4. Confirm: only blocked rows should remain
 java -jar target/openmrs-db-diff.jar report
 ```
+
+### Reconciling metadata
+
+Metadata tables are the excluded tables listed in `config/metadata-tables.txt`: concepts, locations, encounter
+types, attribute types and so on. Other excluded tables, such as Liquibase's, logs, event queues and audit tables,
+are not metadata and are left alone. Edit the list to match your databases; every table in it must also be
+excluded, and must have a uuid column in both databases. Metadata tables are never compared patient by patient. When a patient's rows point at metadata the target
+does not have under the same uuid, those rows are blocked, and so is everything that depends on them. One missing
+location can block every obs recorded there.
+
+```bash
+java -jar target/openmrs-db-diff.jar metadata
+```
+
+This compares every listed metadata table and writes two files to a new folder under `output/`:
+
+| File | Contents |
+| --- | --- |
+| `metadata.csv` | Every metadata row the source has and the target lacks: name, how many synced rows use it and in which tables, which other missing metadata needs it (a location's parent), target rows with the same name, and the suggestion |
+| `metadata-decisions.csv` | A suggested decision for each of those rows that patient data needs |
+
+The decisions are:
+
+| Action | When | What the sync does |
+| --- | --- | --- |
+| `MAP` | The target has it under another uuid (suggested when exactly one target row has the same name) | Rows that point at it are copied pointing at the target's row given in `target_uuid` |
+| `COPY` | The target does not have it (suggested when no target row has the same name) | The row is copied along with the first patient that needs it |
+| `SKIP` | Leave it alone (suggested when several target rows have the same name, so a person has to choose) | Rows that need it stay blocked |
+
+Review the file, change any decision you disagree with (for example turn a `SKIP` into a `MAP` by filling in the
+`target_uuid` you want), and save it as `config/metadata-decisions.csv`, next to `sync.properties` (another path
+can be set with `metadataDecisionsFile` in `sync.properties`). From then on `report` and `sync` follow it; a dry
+run shows the effect before anything is written. Metadata that is not in the file is treated as `SKIP`, and only
+rows of listed metadata tables are ever mapped or copied.
+
+Names are matched exactly (case-insensitively on MySQL): the `name` column, or a concept's fully specified name.
+A copied row only brings its own columns: a copied location does not bring its tags or attributes.
 
 ### Choosing patients
 
@@ -142,8 +188,9 @@ otherwise new patients will not show up in patient search.
 - Only **missing** rows are copied. Rows that exist in both databases but differ are not compared or updated.
 - Only data reachable from a patient is compared. Rows that belong to no patient (a user who never touched a
   selected patient's data, for example) are not reported.
-- Metadata in excluded tables (concepts, locations, encounter types, identifier types, ...) must already exist in
-  the target with the same uuid. Rows that need metadata the target lacks end up in `blocked.csv`.
+- Metadata in excluded tables (concepts, locations, encounter types, identifier types, ...) must be in the target
+  with the same uuid, or be mapped or copied by the metadata decisions. Rows that need other metadata the target
+  lacks end up in `blocked.csv`.
 - `users` and `provider` are not excluded, so users missing from the target are copied along with the first
   patient whose data needs them.
 - Rows linking two patients (a `relationship`, for example) belong to both. The other person is copied along if
@@ -162,7 +209,7 @@ mvn test
 ```
 
 Unit tests need no Docker: each one loads the fixtures into two in-memory H2 databases in MySQL mode, standing
-in for the source and the target. They cover the command line, patient selection, how a patient's record is
+in for the source and the target. They cover the command line, the metadata check and decisions, patient selection, how a patient's record is
 collected, planning (blocked rows, pulled-in users, table order), each run mode, failure isolation and the report
 files.
 
@@ -172,7 +219,8 @@ files.
 tricky cases (person ↔ users cycle, obs groups, drug_order, user_role, an obs on a concept the target does not
 have, a patient whose copy fails on a duplicate username), runs report, dry run and apply, and checks the
 remapped ids, that a failing patient leaves nothing behind and does not stop the others, and that a second apply
-inserts nothing.
+inserts nothing. Last, it runs the metadata check, applies its suggested decision and checks the obs that were
+blocked on the missing concept go through.
 
 ```bash
 ./scripts/local-test.sh
