@@ -1,6 +1,7 @@
 # openmrs-db-diff
 
-A tool that finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it across, one patient at a time.
+Finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it
+across, one patient at a time.
 
 - **source**: the database with the extra data
 - **target**: the source of truth that receives the missing rows
@@ -124,12 +125,13 @@ The decisions are:
 | `SKIP` | Leave it alone (suggested when several target rows have the same name, so a person has to choose) | Rows that need it stay blocked |
 
 Review the file, change any decision you disagree with (for example turn a `SKIP` into a `MAP` by filling in the
-`target_uuid` you want), and save it as `config/metadata-decisions.csv`, next to `sync.properties` (another path
+`target_uuid` you want), and save it as `output/20261022-234928/metadata-decisions.csv`, next to `sync.properties` (another path
 can be set with `metadataDecisionsFile` in `sync.properties`). From then on `report` and `sync` follow it; a dry
 run shows the effect before anything is written. Metadata that is not in the file is treated as `SKIP`, and only
 rows of listed metadata tables are ever mapped or copied.
 
-Names are matched exactly (case-insensitively on MySQL): the `name` column, or a concept's fully specified name.
+Names are matched exactly (case-insensitively on MySQL): the `name` column, a primary key that is the name itself
+(`role`, `privilege`), or a concept's fully specified name.
 A copied row only brings its own columns: a copied location does not bring its tags or attributes.
 
 ### Choosing patients

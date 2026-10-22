@@ -66,6 +66,19 @@ class MetadataCheckTest {
     }
 
     @Test
+    void matchesRolesByTheirNameWhichIsTheirKey() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            f.source.execute("UPDATE role SET uuid = 'role-provider-h4' WHERE role = 'Provider'");
+
+            Finding provider = find(check(f), "role-provider-h4");
+
+            assertEquals("Provider", provider.name());
+            assertEquals(List.of("role-provider"), provider.sameNameInTarget());
+            assertEquals(Action.MAP, provider.suggestion());
+        }
+    }
+
+    @Test
     void listsUnusedMetadataWithoutSuggestingAnything() throws Exception {
         try (SyncFixture f = new SyncFixture()) {
             f.source.execute("INSERT INTO location VALUES (2, 'Store', 'location-store')");

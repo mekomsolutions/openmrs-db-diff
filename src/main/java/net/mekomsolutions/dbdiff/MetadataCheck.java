@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -252,8 +253,8 @@ final class MetadataCheck {
         String sql;
         if (table.name().equals("concept")) {
             sql = CONCEPT_BY_NAME_SQL;
-        } else if (table.column("name") != null) {
-            sql = "SELECT uuid FROM " + Db.q(table.name()) + " WHERE name = ? ORDER BY uuid";
+        } else if (nameColumn(table) != null) {
+            sql = "SELECT uuid FROM " + Db.q(table.name()) + " WHERE " + Db.q(nameColumn(table)) + " = ? ORDER BY uuid";
         } else {
             return List.of();
         }
@@ -269,9 +270,27 @@ final class MetadataCheck {
         return uuids;
     }
 
-    private String nameOf(Schema.Table table, String uuid, Map<String, Object> row) throws SQLException {
+    /**
+     * The column that names a row: {@code name}, or else a primary key that is the name itself, as in role and
+     * privilege. Null when the table has neither.
+     */
+    static String nameColumn(Schema.Table table) {
         if (table.column("name") != null) {
-            Object name = row.get("name");
+            return "name";
+        }
+        if (table.primaryKey().size() == 1) {
+            Schema.Column pk = table.column(table.primaryKey().get(0));
+            String type = pk.dataType().toUpperCase(Locale.ROOT);
+            if (type.contains("CHAR") || type.contains("TEXT")) {
+                return pk.name();
+            }
+        }
+        return null;
+    }
+
+    private String nameOf(Schema.Table table, String uuid, Map<String, Object> row) throws SQLException {
+        if (nameColumn(table) != null) {
+            Object name = row.get(nameColumn(table));
             return name == null ? null : name.toString();
         }
         if (table.name().equals("concept") && sourceSchema.table("concept_name") != null) {
