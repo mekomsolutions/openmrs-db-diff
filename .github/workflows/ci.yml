@@ -17,7 +17,7 @@ jobs:
 
   publish:
     if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' }}
-    needs: license
+    needs: validate
     uses: mekomsolutions/shared-github-workflow/.github/workflows/maven-publish.yml@main
     secrets:
       NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
