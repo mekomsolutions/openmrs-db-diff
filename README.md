@@ -48,6 +48,7 @@ is reported and nothing is written for it; the run carries on with the next one.
 | `IdentityResolver` | Matches rows across the two databases and caches the lookups |
 | `MetadataCheck` | The `metadata` command: metadata the target lacks, what uses it, and suggested decisions |
 | `MetadataDecisions` | The reviewed decisions (MAP, COPY or SKIP) that report and sync follow for missing metadata |
+| `TimezoneRun`, `TimeShift`, `TimezoneCutoffs` | The `timezone` command: which rows and values to shift back from UTC, per location, and the ledger |
 | `ReportWriter`, `CsvWriter`, `CsvReader` | The CSV report, written patient by patient, and reading the decisions |
 | `Databases`, `Schema`, `SyncScope`, `SyncConfig`, `SourceReader`, `Db`, `Log` | Plumbing |
 
@@ -183,6 +184,64 @@ each of them, since every patient's inserts are rolled back before the next one 
 OpenMRS caches data and keeps a search index, and neither sees rows written straight to the database. After a
 sync, restart OpenMRS (or clear its cache) and rebuild the search index from **Administration → Search Index**,
 otherwise new patients will not show up in patient search.
+
+## Fixing historical times (timezone)
+
+Sometimes part of a database's history was stored in a different time zone convention from the rest. For
+example, a server once wrote local wall-clock time and a later one writes UTC, or the other way round, and after a
+migration or merge the older rows read a few hours off. The `timezone` command converts the datetimes of those
+rows, patient by patient, on one database: the target by default, or the source with `--db source`.
+
+```bash
+cp config/timezone-cutoffs.csv.example config/timezone-cutoffs.csv   # set your locations and windows
+
+# Dry run (read-only): lists every value it would change
+java -jar target/openmrs-db-diff.jar timezone --zone America/New_York --to utc \
+    --cutoffs config/timezone-cutoffs.csv --patient <uuid>
+
+# Back up, then apply (asks you to type APPLY)
+docker exec <container name> sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction openmrs' > backup.sql
+java -jar target/openmrs-db-diff.jar timezone --zone America/New_York --to utc \
+    --cutoffs config/timezone-cutoffs.csv --patient <uuid> --apply
+```
+
+**Direction.** `--zone` is the local time zone. `--to utc` treats the old values as local wall-clock time and
+turns them into UTC. `--to local` does the reverse, treating them as UTC and turning them into local time. Daylight
+saving time comes from the Java zone rules, so MySQL's time zone tables are not needed. In the hour skipped when
+clocks go forward, a local time is read as if the clock had not moved yet. In the hour that repeats, the first
+occurrence is used.
+
+**Which rows.** A row is converted when its `date_created` falls in a window: from (inclusive) to before
+(exclusive), compared with the value as stored. When the convention changed on different dates at different
+locations, `--cutoffs` gives each location its own window (CSV `location,from,before`, the location by name, uuid
+or id). A patient gets the window of the location their encounters, visits and identifiers are at. Patients seen
+at several locations are skipped, and so are patients at an unlisted location. Patients seen at no location get
+the `*` row, or `--from` and `--before` when there is no such row. With a single window for everyone, give only
+`--from` and `--before`. Start the window after any bulk import whose times already follow the new convention.
+
+**Which values.** In a row inside the window, every DATETIME column is converted. These are left alone:
+
+- `date_changed`, `date_voided` and `date_retired` values from after the window, which already follow the new convention
+- DATE, TIME and TIMESTAMP columns, NULLs, and the `1970-01-01 00:00:00` placeholder
+- columns given with `--skip-columns table.column,...`. Use this for columns that were written without a time
+  zone. Date-only answers kept at midnight in `obs.value_datetime` are a common case.
+
+Before choosing the window and the skipped columns, compare the hour-of-day spread of each column before and
+after the suspected change. Clinic hours that move by the zone's offset show which rows and columns need
+converting.
+
+The same rows are in scope as for `sync`: everything reachable from the patient except excluded tables, `users`
+and `provider`.
+
+**Output.** Each run writes `output/<time>-timezone/timezone-patients.csv` (status and counts per patient) and
+`timezone-changes.csv` (table, row key, uuid, column, old value and new value for every value converted, or that
+would be). The statuses are `WOULD_SHIFT`, `SHIFTED`, `NOTHING_TO_SHIFT`, `SKIPPED`, `NOT_FOUND` and `FAILED`.
+
+**Safety.** Each patient is one transaction. An update only matches the row if it still holds the values that were
+read. Every converted row goes into a `dbdiff_timezone_shift` table, created on the first apply, in the same
+transaction, with its old and new values. A row is never converted twice: not on a second run, and not when two
+patients share it. That table is also how to undo a run. Restart OpenMRS afterwards so its cache picks up the new
+values.
 
 ## Things to know
 

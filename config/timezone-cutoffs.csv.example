@@ -1,0 +1,10 @@
+# Windows of rows whose datetimes are in the old time zone convention, by date_created as stored.
+# One row per location: a location name, uuid or id, then from (inclusive, may be blank) and before (exclusive),
+# as yyyy-MM-dd[ HH:mm[:ss]]. Patients seen at an unlisted location are left alone. A * row is the window for
+# patients seen at no location. Lines starting with # are comments.
+#
+# Tip: set from after any bulk import whose times already follow the new convention.
+location,from,before
+Main Clinic,2021-02-04,2023-09-26
+Outpatient Ward,,2023-05-01
+*,,2023-05-01

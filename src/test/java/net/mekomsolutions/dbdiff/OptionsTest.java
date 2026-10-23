@@ -55,6 +55,52 @@ class OptionsTest {
     }
 
     @Test
+    void timezoneIsADryRunOnTheTargetUnlessToldOtherwise() {
+        Options o = Options.parse("timezone", "--cutoffs", "c.csv", "--zone", "America/Port-au-Prince", "--to", "local");
+
+        assertEquals(RunMode.TIMEZONE, o.mode());
+        assertEquals("target", o.timezone().database());
+        assertEquals(Path.of("c.csv"), o.timezone().cutoffsFile());
+        assertEquals("America/Port-au-Prince", o.timezone().zone().getId());
+        assertTrue(o.timezone().skipped().isEmpty());
+        assertFalse(o.timezone().toUtc());
+        assertTrue(Options.parse("timezone", "--before", "2026-08-28", "--zone", "UTC", "--to", "utc").timezone().toUtc());
+        assertNull(Options.parse("sync").timezone());
+
+        Options applied = Options.parse("timezone", "--apply", "--db", "source", "--from", "2021-02-04",
+                "--before", "2023-09-26 12:00", "--zone", "UTC", "--to", "local", "--skip-columns", "obs.value_datetime,visit.date_stopped");
+        assertEquals(RunMode.TIMEZONE_APPLY, applied.mode());
+        assertEquals("source", applied.timezone().database());
+        assertEquals("2023-09-26 12:00:00", TimeShift.format(applied.timezone().before()));
+        assertEquals(2, applied.timezone().skipped().size());
+    }
+
+    @Test
+    void timezoneNeedsAZoneADirectionAndAWindow() {
+        assertThrows(IllegalArgumentException.class, () -> Options.parse("timezone", "--before", "2022-01-01"));
+        assertThrows(IllegalArgumentException.class, () -> timezone("--to", "sideways", "--before", "2022-01-01"));
+        assertThrows(IllegalArgumentException.class, () -> timezone("--to", "local"));
+        assertThrows(IllegalArgumentException.class, () -> timezone("--to", "local", "--from", "2021-01-01"));
+        assertThrows(IllegalArgumentException.class,
+                () -> timezone("--to", "local", "--from", "2023-01-01", "--before", "2022-01-01"));
+        assertThrows(IllegalArgumentException.class, () -> timezone("--to", "local", "--before", "yesterday"));
+        assertThrows(IllegalArgumentException.class,
+                () -> timezone("--to", "local", "--before", "2022-01-01", "--db", "other"));
+        assertThrows(IllegalArgumentException.class, () -> Options.parse("timezone", "--to", "local", "--before",
+                "2022-01-01", "--zone", "Mars/Olympus"));
+        assertThrows(IllegalArgumentException.class, () -> Options.parse("sync", "--before", "2022-01-01"));
+    }
+
+    private static Options timezone(String... args) {
+        String[] all = new String[args.length + 3];
+        all[0] = "timezone";
+        all[1] = "--zone";
+        all[2] = "UTC";
+        System.arraycopy(args, 0, all, 3, args.length);
+        return Options.parse(all);
+    }
+
+    @Test
     void rejectsBadArguments() {
         assertThrows(IllegalArgumentException.class, Options::parse);
         assertThrows(IllegalArgumentException.class, () -> Options.parse("report", "--apply"));

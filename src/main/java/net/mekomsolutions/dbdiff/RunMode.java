@@ -9,5 +9,13 @@ enum RunMode {
     /** Insert each patient's rows and commit, one transaction per patient. */
     APPLY,
     /** Compare metadata only, and suggest what to do with metadata the target lacks. Nothing is written. */
-    METADATA
+    METADATA,
+    /** List the historical datetimes that would be shifted back to local time. Nothing is written but the report. */
+    TIMEZONE,
+    /** Shift historical datetimes back to local time, one transaction per patient. */
+    TIMEZONE_APPLY;
+
+    boolean isTimezone() {
+        return this == TIMEZONE || this == TIMEZONE_APPLY;
+    }
 }

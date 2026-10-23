@@ -85,8 +85,10 @@ final class TestDatabase implements AutoCloseable {
             Schema.Table table = schema.addTable(name);
             try (ResultSet rs = meta.getColumns(null, "public", name, "%")) {
                 while (rs.next()) {
+                    // H2 turns MySQL's DATETIME into TIMESTAMP
+                    String type = rs.getString("TYPE_NAME").toLowerCase(Locale.ROOT);
                     table.addColumn(new Schema.Column(rs.getString("COLUMN_NAME"),
-                            rs.getString("TYPE_NAME").toLowerCase(Locale.ROOT),
+                            type.equals("timestamp") ? "datetime" : type,
                             "YES".equals(rs.getString("IS_NULLABLE")),
                             "YES".equals(rs.getString("IS_AUTOINCREMENT"))));
                 }

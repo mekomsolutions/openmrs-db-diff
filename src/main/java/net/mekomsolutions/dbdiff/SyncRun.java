@@ -139,6 +139,7 @@ final class SyncRun {
             case DRY_RUN -> "Dry run (every insert is rolled back)";
             case APPLY -> "Sync, committing patient by patient";
             case METADATA -> "Metadata check";
+            case TIMEZONE, TIMEZONE_APPLY -> "Timezone shift";
         };
     }
 

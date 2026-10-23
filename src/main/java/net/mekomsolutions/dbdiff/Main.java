@@ -17,7 +17,9 @@ public final class Main {
             return;
         }
         try {
-            System.exit(new SyncRun(options, SyncConfig.load(options.config())).execute());
+            SyncConfig config = SyncConfig.load(options.config());
+            System.exit(options.mode().isTimezone() ? new TimezoneRun(options, config).execute()
+                    : new SyncRun(options, config).execute());
         } catch (Exception e) {
             System.err.println("ERROR: " + e.getMessage());
             System.exit(1);

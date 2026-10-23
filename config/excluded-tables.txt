@@ -109,3 +109,5 @@ failed_event_retry_log
 failed_events
 idgen_log_entry
 idgen_seq_id_gen
+# Written by the timezone command
+dbdiff_timezone_shift
