@@ -33,25 +33,6 @@ is reported and nothing is written for it; the run carries on with the next one.
    same uuid. Foreign-key cycles (person ↔ users) and obs groups are handled with a temporary value that is fixed
    once the parent row exists. Each patient is one transaction: any error rolls back that patient only.
 
-## Code map
-
-| Class | Role |
-| --- | --- |
-| `Main`, `Options` | Command line |
-| `SyncRun` | Runs every selected patient through `PatientSyncer`, keeps going on failure, writes the report |
-| `PatientList` | Patients to process: from `--patient`, `--patients-file`, or every patient in the source |
-| `PatientSyncer` | One patient: collect, compare, plan, sync |
-| `PatientRecordCollector` | Reads a patient's rows from the source, following `TableLinks` |
-| `TableLinks` | Which foreign keys make a row part of a patient's record, and which rows extend another |
-| `SyncPlanner`, `SyncPlan`, `TableOrder` | What can be copied, what is blocked and why, and in which table order |
-| `SyncExecutor` | Inserts a plan in one transaction, remapping ids; rolls back on dry run or error |
-| `IdentityResolver` | Matches rows across the two databases and caches the lookups |
-| `MetadataCheck` | The `metadata` command: metadata the target lacks, what uses it, and suggested decisions |
-| `MetadataDecisions` | The reviewed decisions (MAP, COPY or SKIP) that report and sync follow for missing metadata |
-| `TimezoneRun`, `TimeShift`, `TimezoneCutoffs` | The `timezone` command: which rows and values to shift back from UTC, per location, and the ledger |
-| `ReportWriter`, `CsvWriter`, `CsvReader` | The CSV report, written patient by patient, and reading the decisions |
-| `Databases`, `Schema`, `SyncScope`, `SyncConfig`, `SourceReader`, `Db`, `Log` | Plumbing |
-
 ## Build
 
 Requires Java 17+ and Maven.
@@ -261,27 +242,3 @@ values.
 - If the connection to either database is lost, the run stops instead of failing every remaining patient. The
   report covers the patients processed so far; patients already applied stay applied, so it is safe to re-run.
 - Rows with a NULL uuid are ignored.
-
-## Tests
-
-```bash
-mvn test
-```
-
-Unit tests need no Docker: each one loads the fixtures into two in-memory H2 databases in MySQL mode, standing
-in for the source and the target. They cover the command line, the metadata check and decisions, patient selection, how a patient's record is
-collected, planning (blocked rows, pulled-in users, table order), each run mode, failure isolation and the report
-files.
-
-### End-to-end self-test
-
-`scripts/local-test.sh` starts two throwaway MySQL 5.7 containers, loads a small OpenMRS-shaped schema with
-tricky cases (person ↔ users cycle, obs groups, drug_order, user_role, an obs on a concept the target does not
-have, a patient whose copy fails on a duplicate username), runs report, dry run and apply, and checks the
-remapped ids, that a failing patient leaves nothing behind and does not stop the others, and that a second apply
-inserts nothing. Last, it runs the metadata check, applies its suggested decision and checks the obs that were
-blocked on the missing concept go through.
-
-```bash
-./scripts/local-test.sh
-```
