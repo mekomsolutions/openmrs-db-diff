@@ -4,3 +4,4 @@ config/sync.properties
 *.iml
 .idea/
 config/timezone-cutoffs.csv
+config/metadata-decisions.csv
