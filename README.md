@@ -22,6 +22,14 @@ is reported and nothing is written for it; the run carries on with the next one.
 2. **Compare.** Rows are matched by `uuid`. Tables without a uuid column are matched by their primary key with
    foreign keys translated to the uuid of the row they point at (for example `patient` matches through
    `person.uuid`, `drug_order` through `orders.uuid`, `user_role` through `users.uuid` + role).
+   A row the target already has must also sit in the same place there: same patient, same visit, same encounter,
+   same obs group. If it does not (legacy imports generated uuids from local ids, so two sites can share a uuid
+   for unrelated rows), the patient is a *conflict* and nothing is copied for it; see `conflicts.csv`.
+   The exception is a *placeholder*: a row a database merge pointed at a placeholder parent (a person, visit,
+   encounter, location, user, ... with uuid `[PHANTOM_UUID]`) because the real one was not known yet. The sync
+   writes the source row over it, keeping its id, so whatever already points at it (obs, providers) ends up on the
+   right patient and visit. Set `placeholderUuid` in `sync.properties` if your merge used another marker; leave it
+   empty to turn this off.
 3. **Plan.** A missing row can be copied when every foreign key it holds points at a row that is already in the
    target (matched by uuid) or is copied with it. Rows the patient's data points at that the target lacks, such
    as the user who registered the patient, are pulled in from the source and copied too, together with the rows
@@ -140,10 +148,11 @@ Each run prints one line per patient and writes a timestamped folder under `outp
 
 | File | Contents |
 | --- | --- |
-| `patients.csv` | Per patient: status, rows in the source, missing from the target, syncable, blocked, inserted, error |
+| `patients.csv` | Per patient: status, rows in the source, missing from the target, syncable, blocked, inserted (placeholders written over included), placeholders, conflicts, error |
 | `summary.csv` | Per table totals over all patients |
-| `missing/<table>.csv` | Every missing row exactly as it is in the source, with its patient and whether it can be synced |
+| `missing/<table>.csv` | Every missing row exactly as it is in the source, with its patient and whether it can be synced (`syncable`, `placeholder` or `blocked`) |
 | `blocked.csv` | Missing rows that cannot be synced, and why |
+| `conflicts.csv` | Rows the target already has under the same uuid but attached to a different parent: the column, and the parent in each database |
 
 Patient statuses:
 
@@ -154,6 +163,7 @@ Patient statuses:
 | `DRY_RUN_OK` | The dry run inserted the patient's rows without errors and rolled back |
 | `SYNCED` | The patient's rows were inserted and committed |
 | `BLOCKED` | Rows are missing but none can be copied; see `blocked.csv` |
+| `CONFLICT` | Rows the target already has are attached elsewhere there; nothing was copied; see `conflicts.csv` |
 | `NOT_FOUND` | The source has no patient with this uuid |
 | `FAILED` | Something went wrong; nothing was written for this patient. The error is in `patients.csv` |
 
@@ -226,7 +236,8 @@ values.
 
 ## Things to know
 
-- Only **missing** rows are copied. Rows that exist in both databases but differ are not compared or updated.
+- Only **missing** rows are copied. Rows that exist in both databases but differ are not updated. Their links to
+  the patient's other rows are compared, and a mismatch stops the patient (`CONFLICT`); other columns are not.
 - Only data reachable from a patient is compared. Rows that belong to no patient (a user who never touched a
   selected patient's data, for example) are not reported.
 - Metadata in excluded tables (concepts, locations, encounter types, identifier types, ...) must be in the target

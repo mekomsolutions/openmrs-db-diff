@@ -41,18 +41,28 @@ final class SyncPlanner {
     }
 
     SyncPlan plan(Map<Schema.Table, List<SourceRow>> missing) throws SQLException {
+        return plan(missing, Map.of());
+    }
+
+    /**
+     * As {@link #plan(Map)}, also writing {@code placeholders} over the target rows with the same identity, which
+     * the target holds as placeholders (see {@link OwnershipCheck}).
+     */
+    SyncPlan plan(Map<Schema.Table, List<SourceRow>> missing, Map<Schema.Table, List<SourceRow>> placeholders)
+            throws SQLException {
         Draft draft = new Draft();
-        Map<Schema.Table, List<SourceRow>> next = missing;
-        while (!next.isEmpty()) {
-            List<PlannedRow> added = addRows(draft, next);
-            next = missingParents(draft, added);
+        List<PlannedRow> added = addRows(draft, placeholders, true);
+        added.addAll(addRows(draft, missing, false));
+        while (!added.isEmpty()) {
+            added = addRows(draft, missingParents(draft, added), false);
         }
         dropUnsatisfiable(draft);
         return draft.toPlan();
     }
 
     /** Plans rows with their foreign keys resolved; a row pointing at nothing, even in the source, is blocked. */
-    private List<PlannedRow> addRows(Draft draft, Map<Schema.Table, List<SourceRow>> rowsByTable) throws SQLException {
+    private List<PlannedRow> addRows(Draft draft, Map<Schema.Table, List<SourceRow>> rowsByTable, boolean replace)
+            throws SQLException {
         List<PlannedRow> added = new ArrayList<>();
         for (Map.Entry<Schema.Table, List<SourceRow>> e : rowsByTable.entrySet()) {
             Schema.Table table = e.getKey();
@@ -84,7 +94,7 @@ final class SyncPlanner {
                 if (problem != null) {
                     draft.block(new BlockedRow(table, row, problem));
                 } else {
-                    PlannedRow planned = new PlannedRow(table, row, refs);
+                    PlannedRow planned = new PlannedRow(table, row, refs, replace);
                     draft.add(planned);
                     added.add(planned);
                 }

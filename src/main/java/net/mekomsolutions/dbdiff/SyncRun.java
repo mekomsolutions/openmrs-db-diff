@@ -71,6 +71,7 @@ final class SyncRun {
 
             Map<Status, Integer> tally = new EnumMap<>(Status.class);
             long blockedRows = 0;
+            long conflicts = 0;
             Path reportDir;
             try (ReportWriter report = new ReportWriter(newReportDir())) {
                 reportDir = report.dir();
@@ -79,6 +80,7 @@ final class SyncRun {
                     report.add(result);
                     tally.merge(result.status(), 1, Integer::sum);
                     blockedRows += result.blocked();
+                    conflicts += result.conflictCount();
                     logProgress(i + 1, patients.size(), result);
                     if (result.status() == Status.FAILED && !db.allValid()) {
                         throw new SQLException("Lost a database connection after " + (i + 1) + " of "
@@ -90,6 +92,10 @@ final class SyncRun {
             if (blockedRows > 0) {
                 Log.info(blockedRows + " missing row(s) are blocked; see blocked.csv. When they point at metadata the"
                         + " target lacks, run the metadata command to reconcile it first.");
+            }
+            if (conflicts > 0) {
+                Log.warn(conflicts + " row(s) the target already has are attached to another patient, visit,"
+                        + " encounter or obs there; see conflicts.csv. Those patients were not synced.");
             }
             return tally.containsKey(Status.FAILED) ? 1 : 0;
         }
@@ -161,11 +167,13 @@ final class SyncRun {
         String detail = switch (r.status()) {
             case NOT_FOUND -> "no such patient in the source";
             case FAILED -> r.error();
-            default -> String.format("missing %d, syncable %d, blocked %d, inserted %d",
-                    r.missing(), r.syncable(), r.blocked(), r.insertedTotal());
+            case CONFLICT -> r.conflictCount() + " row(s) attached elsewhere in the target, e.g. "
+                    + r.conflicts().get(0).describe();
+            default -> String.format("missing %d, syncable %d (placeholders %d), blocked %d, inserted %d",
+                    r.missing(), r.syncable(), r.placeholders(), r.blocked(), r.insertedTotal());
         };
         String line = String.format("%s %s  %-10s %s", position, r.patientUuid(), r.status(), detail);
-        if (r.status() == Status.FAILED) {
+        if (r.status() == Status.FAILED || r.status() == Status.CONFLICT) {
             Log.warn(line);
         } else {
             Log.info(line);

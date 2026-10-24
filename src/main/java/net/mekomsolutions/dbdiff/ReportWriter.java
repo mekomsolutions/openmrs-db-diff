@@ -15,8 +15,9 @@ import java.util.TreeMap;
  * <ul>
  *   <li>patients.csv: one line per patient with its status and counts</li>
  *   <li>missing/&lt;table&gt;.csv: every missing row as it is in the source, with the patient it was found for
- *       and whether it can be synced</li>
+ *       and whether it can be synced (or, for a placeholder in the target, written over)</li>
  *   <li>blocked.csv: missing rows that cannot be synced, with the reason</li>
+ *   <li>conflicts.csv: rows the target already has but attached to another parent, which stop the patient</li>
  *   <li>summary.csv: per table totals, written when the report is closed</li>
  * </ul>
  */
@@ -25,6 +26,7 @@ final class ReportWriter implements AutoCloseable {
     private final Path dir;
     private final CsvWriter patients;
     private final CsvWriter blocked;
+    private final CsvWriter conflicts;
     private final Map<String, CsvWriter> missingByTable = new HashMap<>();
     private final Map<String, TableTotals> totals = new TreeMap<>();
 
@@ -32,8 +34,10 @@ final class ReportWriter implements AutoCloseable {
         this.dir = Files.createDirectories(dir);
         Files.createDirectories(dir.resolve("missing"));
         this.patients = new CsvWriter(dir.resolve("patients.csv"), List.of("patient_uuid", "status", "source_rows",
-                "missing_in_target", "syncable", "blocked", "inserted", "error"));
+                "missing_in_target", "syncable", "blocked", "inserted", "placeholders", "conflicts", "error"));
         this.blocked = new CsvWriter(dir.resolve("blocked.csv"), List.of("patient_uuid", "table", "row", "reason"));
+        this.conflicts = new CsvWriter(dir.resolve("conflicts.csv"), List.of("patient_uuid", "table", "row", "column",
+                "source_parent", "target_parent"));
     }
 
     Path dir() {
@@ -44,7 +48,13 @@ final class ReportWriter implements AutoCloseable {
         String patient = result.patientUuid();
         patients.row(List.of(patient, result.status().name(), String.valueOf(result.sourceRows()),
                 String.valueOf(result.missing()), String.valueOf(result.syncable()), String.valueOf(result.blocked()),
-                String.valueOf(result.insertedTotal()), result.error() == null ? "" : result.error()));
+                String.valueOf(result.insertedTotal()), String.valueOf(result.placeholders()),
+                String.valueOf(result.conflictCount()),
+                result.error() == null ? "" : result.error()));
+        for (OwnershipCheck.Conflict c : result.conflicts()) {
+            conflicts.row(List.of(patient, c.table().name(), c.row().describe(), c.fk().column(),
+                    parent(c.fk(), c.sourceParent()), parent(c.fk(), c.targetParent())));
+        }
 
         if (result.record() != null) {
             result.record().rows().forEach((table, rows) -> totals(table.name()).sourceRows += rows.size());
@@ -52,7 +62,7 @@ final class ReportWriter implements AutoCloseable {
         if (result.plan() != null) {
             for (List<SyncPlan.PlannedRow> rows : result.plan().rows().values()) {
                 for (SyncPlan.PlannedRow row : rows) {
-                    writeMissing(patient, "syncable", row.table(), row.row());
+                    writeMissing(patient, row.replace() ? "placeholder" : "syncable", row.table(), row.row());
                     totals(row.table().name()).syncable++;
                 }
             }
@@ -63,6 +73,10 @@ final class ReportWriter implements AutoCloseable {
             }
         }
         result.inserted().forEach((table, n) -> totals(table).inserted += n);
+    }
+
+    private static String parent(Schema.ForeignKey fk, String identity) {
+        return identity == null ? "" : fk.refTable() + " " + IdentityResolver.readable(identity);
     }
 
     private void writeMissing(String patient, String status, Schema.Table table, SourceRow row) throws IOException {
@@ -90,6 +104,7 @@ final class ReportWriter implements AutoCloseable {
         } finally {
             patients.close();
             blocked.close();
+            conflicts.close();
             for (CsvWriter out : missingByTable.values()) {
                 out.close();
             }

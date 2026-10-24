@@ -124,4 +124,102 @@ class PatientSyncerTest {
             assertEquals(Status.NOT_FOUND, f.syncer(RunMode.APPLY).sync("no-such-patient").status());
         }
     }
+
+    @Test
+    void rowAlreadyInTheTargetUnderAnotherPatientStopsThePatient() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            // the target holds an encounter with p2's encounter uuid, but it belongs to another person
+            f.target.execute(
+                    "INSERT INTO patient VALUES (2, 1, '2021-01-01 00:00:00', 0)",
+                    "INSERT INTO encounter VALUES (2, 1, 2, 1, '2021-01-01 00:00:00', 1, '2021-01-01 00:00:00', 'enc-p2')");
+
+            PatientResult result = f.syncer(RunMode.APPLY).sync("person-p2");
+
+            assertEquals(Status.CONFLICT, result.status());
+            assertEquals(1, result.conflictCount());
+            OwnershipCheck.Conflict conflict = result.conflicts().get(0);
+            assertEquals("encounter", conflict.table().name());
+            assertEquals("patient_id", conflict.fk().column());
+            assertEquals("person-p2", conflict.sourceParent());
+            assertEquals("person-only-in-target", conflict.targetParent());
+            assertEquals(0, result.insertedTotal());
+            assertEquals(4, f.target.count("person"));
+            assertEquals(1, f.target.count("obs"));
+        }
+    }
+
+    @Test
+    void rowsAttachedToTheSameParentsAreNoConflict() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            PatientSyncer syncer = f.syncer(RunMode.APPLY);
+            syncer.sync("person-p2");
+
+            PatientResult again = syncer.sync("person-p2");
+
+            assertEquals(Status.IN_SYNC, again.status());
+            assertEquals(0, again.conflictCount());
+        }
+    }
+
+    @Test
+    void placeholderRowIsWrittenOverWithTheSourceRow() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            // a merge parked p2's encounter on the placeholder person, with made-up values
+            f.target.execute(
+                    "INSERT INTO person VALUES (9, NULL, NULL, 1, '1970-01-01 00:00:00', 1, '[PHANTOM_UUID]')",
+                    "INSERT INTO patient VALUES (9, 1, '1970-01-01 00:00:00', 1)",
+                    "INSERT INTO encounter VALUES (7, 1, 9, NULL, '1970-01-01 00:00:00', 1, '1970-01-01 00:00:00', 'enc-p2')");
+
+            PatientResult result = f.syncer(RunMode.APPLY).sync("person-p2");
+
+            assertEquals(Status.SYNCED, result.status());
+            assertEquals(0, result.conflictCount());
+            assertEquals(1, result.placeholders());
+            assertEquals("7", f.targetValue("SELECT encounter_id FROM encounter WHERE uuid = 'enc-p2'"));
+            assertEquals("person-p2", f.targetValue(
+                    "SELECT p.uuid FROM encounter e JOIN person p ON p.person_id = e.patient_id WHERE e.uuid = 'enc-p2'"));
+            assertEquals("location-clinic", f.targetValue(
+                    "SELECT l.uuid FROM encounter e JOIN location l ON l.location_id = e.location_id WHERE e.uuid = 'enc-p2'"));
+            assertEquals("2022-03-03 09:20:00", f.targetValue(
+                    "SELECT FORMATDATETIME(encounter_datetime, 'yyyy-MM-dd HH:mm:ss') FROM encounter WHERE uuid = 'enc-p2'"));
+            assertEquals("enc-p2", f.targetValue(
+                    "SELECT e.uuid FROM obs o JOIN encounter e ON e.encounter_id = o.encounter_id WHERE o.uuid = 'obs-p2-weight-child'"));
+        }
+    }
+
+    @Test
+    void reportCountsPlaceholdersWithoutWriting() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            f.target.execute(
+                    "INSERT INTO person VALUES (9, NULL, NULL, 1, '1970-01-01 00:00:00', 1, '[PHANTOM_UUID]')",
+                    "INSERT INTO patient VALUES (9, 1, '1970-01-01 00:00:00', 1)",
+                    "INSERT INTO encounter VALUES (7, 1, 9, NULL, '1970-01-01 00:00:00', 1, '1970-01-01 00:00:00', 'enc-p2')");
+
+            PatientResult result = f.syncer(RunMode.REPORT).sync("person-p2");
+
+            assertEquals(Status.MISSING, result.status());
+            assertEquals(1, result.placeholders());
+            assertEquals("9", f.targetValue("SELECT patient_id FROM encounter WHERE uuid = 'enc-p2'"));
+        }
+    }
+
+    @Test
+    void rowOnAPlaceholderLocationIsWrittenOverToo() throws Exception {
+        try (SyncFixture f = new SyncFixture()) {
+            // p2 and its encounter are in the target, but the merge did not know the encounter's location
+            f.target.execute(
+                    "INSERT INTO person VALUES (10, 'F', '2000-12-31', 1, '2022-03-03 09:15:00', 0, 'person-p2')",
+                    "INSERT INTO patient VALUES (10, 1, '2022-03-03 09:15:00', 0)",
+                    "INSERT INTO location VALUES (5, 'Unknown', '[PHANTOM_UUID]')",
+                    "INSERT INTO encounter VALUES (8, 1, 10, 5, '1970-01-01 00:00:00', 1, '1970-01-01 00:00:00', 'enc-p2')");
+
+            PatientResult result = f.syncer(RunMode.APPLY).sync("person-p2");
+
+            assertEquals(Status.SYNCED, result.status());
+            assertEquals(1, result.placeholders());
+            assertEquals("8", f.targetValue("SELECT encounter_id FROM encounter WHERE uuid = 'enc-p2'"));
+            assertEquals("location-clinic", f.targetValue(
+                    "SELECT l.uuid FROM encounter e JOIN location l ON l.location_id = e.location_id WHERE e.uuid = 'enc-p2'"));
+        }
+    }
 }

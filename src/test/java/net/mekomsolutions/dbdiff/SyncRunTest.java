@@ -23,10 +23,10 @@ class SyncRunTest {
 
             assertEquals(0, exit);
             assertEquals(List.of(
-                    "patient_uuid,status,source_rows,missing_in_target,syncable,blocked,inserted,error",
-                    "person-p1,MISSING,8,3,1,2,0,",
-                    "person-p2,MISSING,8,11,11,0,0,",
-                    "person-p3,MISSING,3,5,5,0,0,"), lines("patients.csv"));
+                    "patient_uuid,status,source_rows,missing_in_target,syncable,blocked,inserted,placeholders,conflicts,error",
+                    "person-p1,MISSING,8,3,1,2,0,0,0,",
+                    "person-p2,MISSING,8,11,11,0,0,0,0,",
+                    "person-p3,MISSING,3,5,5,0,0,0,0,"), lines("patients.csv"));
             assertEquals(4, f.target.count("person"));
         }
     }

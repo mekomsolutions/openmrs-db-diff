@@ -21,9 +21,21 @@ import java.util.TreeSet;
  *                       and can be mapped or copied
  * @param metadataDecisionsFile reviewed decisions for metadata the target lacks (see {@link MetadataDecisions});
  *                              may not exist, or be null
+ * @param placeholderUuid uuid a database merge gave the placeholder rows it pointed rows at while their real parent
+ *                        (patient, visit, encounter, ...) was unknown; target rows pointing at one are overwritten
+ *                        from the source (see {@link OwnershipCheck}). Null or empty turns this off
  */
 record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir,
-                  Set<String> metadataTables, Path metadataDecisionsFile) {
+                  Set<String> metadataTables, Path metadataDecisionsFile, String placeholderUuid) {
+
+    /** The placeholder uuid the H2-H8 into H9 merge used. */
+    static final String DEFAULT_PLACEHOLDER_UUID = "[PHANTOM_UUID]";
+
+    SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir,
+               Set<String> metadataTables, Path metadataDecisionsFile) {
+        this(source, target, excludedTables, outputDir, metadataTables, metadataDecisionsFile,
+                DEFAULT_PLACEHOLDER_UUID);
+    }
 
     SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTables, Path outputDir) {
         this(source, target, excludedTables, outputDir, Set.of(), null);
@@ -46,7 +58,8 @@ record SyncConfig(DbSettings source, DbSettings target, Set<String> excludedTabl
         Set<String> metadata = Files.exists(metadataFile) ? tableList(metadataFile) : Set.of();
         return new SyncConfig(db(p, "source"), db(p, "target"), excluded,
                 Path.of(p.getProperty("outputDir", "output")), metadata,
-                base.resolve(p.getProperty("metadataDecisionsFile", "metadata-decisions.csv")));
+                base.resolve(p.getProperty("metadataDecisionsFile", "metadata-decisions.csv")),
+                p.getProperty("placeholderUuid", DEFAULT_PLACEHOLDER_UUID).trim());
     }
 
     /** Table names, one per line; blank lines and lines starting with # are ignored. */

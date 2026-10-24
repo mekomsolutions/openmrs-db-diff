@@ -26,5 +26,10 @@ metadataTablesFile=metadata-tables.txt
 # suggests one; the file is optional.
 metadataDecisionsFile=metadata-decisions.csv
 
+# Uuid a database merge gave the placeholder rows (person, visit, encounter, location, user, ...) it pointed rows at
+# while their real parent was unknown. Target rows pointing at one, with the same uuid as a source row, are written
+# over with the source row. Empty turns this off.
+placeholderUuid=[PHANTOM_UUID]
+
 # Each run writes a timestamped folder here (relative to where you run the jar).
 outputDir=output

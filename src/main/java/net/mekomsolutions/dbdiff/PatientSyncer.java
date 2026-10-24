@@ -15,14 +15,16 @@ final class PatientSyncer {
 
     private final PatientRecordCollector collector;
     private final IdentityResolver resolver;
+    private final OwnershipCheck ownership;
     private final SyncPlanner planner;
     private final SyncExecutor executor;
     private final RunMode mode;
 
-    PatientSyncer(PatientRecordCollector collector, IdentityResolver resolver, SyncPlanner planner,
-                  SyncExecutor executor, RunMode mode) {
+    PatientSyncer(PatientRecordCollector collector, IdentityResolver resolver, OwnershipCheck ownership,
+                  SyncPlanner planner, SyncExecutor executor, RunMode mode) {
         this.collector = collector;
         this.resolver = resolver;
+        this.ownership = ownership;
         this.planner = planner;
         this.executor = executor;
         this.mode = mode;
@@ -43,15 +45,18 @@ final class PatientSyncer {
         return new PatientSyncer(
                 new PatientRecordCollector(source, links, reader),
                 resolver,
+                new OwnershipCheck(source, resolver, config.placeholderUuid()),
                 new SyncPlanner(source, scope, links, reader, resolver),
                 new SyncExecutor(db.targetWrite(), scope, resolver),
                 mode);
     }
 
     /**
-     * Processes one patient. A failed insert gives a FAILED result that still carries the plan; any other exception
-     * is thrown. Either way nothing was written for this patient: inserts only happen inside the executor's
-     * transaction, which rolls back on failure.
+     * Processes one patient. Rows the target holds as placeholders are written over like missing rows. A patient
+     * whose rows are otherwise attached elsewhere in the target gives a CONFLICT result and nothing is written, in
+     * any mode (see {@link OwnershipCheck}). A failed write gives a FAILED result that still carries the plan; any
+     * other exception is thrown. Either way nothing was written for this patient: writes only happen inside the
+     * executor's transaction, which rolls back on failure.
      */
     PatientResult sync(String patientUuid) throws SQLException {
         Optional<PatientRecord> found = collector.collect(patientUuid);
@@ -60,7 +65,13 @@ final class PatientSyncer {
         }
         PatientRecord record = found.get();
         try {
-            SyncPlan plan = planner.plan(missingFromTarget(resolver, record));
+            Map<Schema.Table, List<SourceRow>> missing = missingFromTarget(resolver, record);
+            OwnershipCheck.Findings checked = ownership.check(record, missing);
+            SyncPlan plan = planner.plan(missing, checked.placeholders());
+            if (!checked.conflicts().isEmpty()) {
+                return new PatientResult(record.patientUuid(), Status.CONFLICT, record, plan, checked.conflicts(),
+                        Map.of(), null);
+            }
             if (plan.missing() == 0) {
                 return result(record, plan, Status.IN_SYNC, Map.of());
             }
@@ -98,6 +109,6 @@ final class PatientSyncer {
     }
 
     private PatientResult result(PatientRecord record, SyncPlan plan, Status status, Map<String, Integer> inserted) {
-        return new PatientResult(record.patientUuid(), status, record, plan, inserted, null);
+        return new PatientResult(record.patientUuid(), status, record, plan, List.of(), inserted, null);
     }
 }
