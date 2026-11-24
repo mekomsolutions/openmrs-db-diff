@@ -18,8 +18,14 @@ public final class Main {
         }
         try {
             SyncConfig config = SyncConfig.load(options.config());
-            System.exit(options.mode().isTimezone() ? new TimezoneRun(options, config).execute()
-                    : new SyncRun(options, config).execute());
+            if (!options.mode().isTimezone()) {
+                System.exit(new SyncRun(options, config).execute());
+            }
+            System.exit(switch (options.timezone().action()) {
+                case TABLES -> new TableTimezoneRun(options, config).execute();
+                case UNDO -> new TimezoneUndo(options, config).execute();
+                case SUGGEST_SITE_KEYS -> new SiteKeySuggester(options, config).execute();
+            });
         } catch (Exception e) {
             System.err.println("ERROR: " + e.getMessage());
             System.exit(1);

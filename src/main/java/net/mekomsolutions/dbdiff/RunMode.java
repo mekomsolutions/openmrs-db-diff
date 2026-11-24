@@ -10,9 +10,9 @@ enum RunMode {
     APPLY,
     /** Compare metadata only, and suggest what to do with metadata the target lacks. Nothing is written. */
     METADATA,
-    /** List the historical datetimes that would be shifted back to local time. Nothing is written but the report. */
+    /** List the datetimes the timezone command would convert or restore. Nothing is written but the report. */
     TIMEZONE,
-    /** Shift historical datetimes back to local time, one transaction per patient. */
+    /** Convert or restore them, chunk by chunk. */
     TIMEZONE_APPLY;
 
     boolean isTimezone() {

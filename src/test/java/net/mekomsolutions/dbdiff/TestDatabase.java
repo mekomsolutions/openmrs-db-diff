@@ -40,6 +40,12 @@ final class TestDatabase implements AutoCloseable {
         return db;
     }
 
+    /** An empty database; fill it with {@link #execute}. */
+    static TestDatabase empty() throws SQLException {
+        return new TestDatabase("jdbc:h2:mem:" + UUID.randomUUID()
+                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;CASE_INSENSITIVE_IDENTIFIERS=TRUE;DB_CLOSE_DELAY=-1");
+    }
+
     String url() {
         return url;
     }

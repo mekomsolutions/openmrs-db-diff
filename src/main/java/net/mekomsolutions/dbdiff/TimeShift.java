@@ -7,28 +7,15 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoField;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Set;
 
 /**
- * Converts datetimes that were stored in the wrong time zone: from UTC to the wall-clock time of a zone, or with
- * {@code toUtc} the other way. This is for databases where a period of historical rows was written in one convention
- * and the rest in the other, so that both end up reading the same. Daylight saving time is taken from the zone
- * rules, not a fixed offset.
- *
- * <p>A row is converted when its {@code date_created} falls in the {@link Window} of rows written in the old
- * convention. All its DATETIME columns move, except skipped ones (columns that were written without a time zone,
- * such as date-only answers kept at midnight) and change columns ({@code date_changed}, {@code date_voided},
- * {@code date_retired}) set after the window, which follow the new convention already. DATE, TIME and TIMESTAMP
- * columns, NULLs and the 1970-01-01 00:00:00 placeholder are never touched.
+ * Converts datetimes that were stored in the wrong time zone convention: from UTC to the wall-clock time of a zone,
+ * or with {@code toUtc} the other way. Daylight saving time comes from the zone rules, not a fixed offset.
  */
 final class TimeShift {
 
-    private static final Set<String> CHANGE_COLUMNS = Set.of("date_changed", "date_voided", "date_retired");
-    private static final LocalDateTime PLACEHOLDER = LocalDateTime.of(1970, 1, 1, 0, 0);
     private static final DateTimeFormatter FORMAT = new DateTimeFormatterBuilder()
             .appendPattern("yyyy-MM-dd HH:mm:ss")
             .optionalStart().appendFraction(ChronoField.NANO_OF_SECOND, 0, 9, true).optionalEnd()
@@ -42,7 +29,7 @@ final class TimeShift {
             .toFormatter(Locale.ROOT);
 
     /**
-     * The rows the migration converted, by {@code date_created} as stored: from {@code from} (inclusive, null for no
+     * The rows to convert, by {@code date_created} as stored: from {@code from} (inclusive, null for no
      * lower bound) to {@code before} (exclusive).
      */
     record Window(LocalDateTime from, LocalDateTime before) {
@@ -66,49 +53,16 @@ final class TimeShift {
         }
     }
 
-    /** One value to change. */
+    /** One value changed: its column, old and new value as text. */
     record Change(String column, String oldValue, String newValue) {}
 
     private final ZoneId zone;
-    private final Set<String> skipped;
     private final boolean toUtc;
 
-    TimeShift(ZoneId zone, Set<String> skipped) {
-        this(zone, skipped, false);
-    }
-
     /** {@code toUtc}: values are wall-clock times in the zone, to be turned into UTC. */
-    TimeShift(ZoneId zone, Set<String> skipped, boolean toUtc) {
+    TimeShift(ZoneId zone, boolean toUtc) {
         this.zone = zone;
-        this.skipped = Set.copyOf(skipped.stream().map(s -> s.toLowerCase(Locale.ROOT)).toList());
         this.toUtc = toUtc;
-    }
-
-    ZoneId zone() {
-        return zone;
-    }
-
-    /** The values of {@code row} to shift; empty when the row was not converted by the migration. */
-    List<Change> changes(Schema.Table table, Map<String, Object> row, Window window) {
-        if (!table.hasColumn("date_created") || !window.contains(parse(row.get("date_created")))) {
-            return List.of();
-        }
-        List<Change> changes = new ArrayList<>();
-        for (Schema.Column column : table.columns()) {
-            if (!"datetime".equals(column.dataType())
-                    || skipped.contains((table.name() + "." + column.name()).toLowerCase(Locale.ROOT))) {
-                continue;
-            }
-            LocalDateTime value = parse(row.get(column.name()));
-            if (value == null || value.equals(PLACEHOLDER)) {
-                continue;
-            }
-            if (CHANGE_COLUMNS.contains(column.name().toLowerCase(Locale.ROOT)) && !window.contains(value)) {
-                continue;
-            }
-            changes.add(new Change(column.name(), row.get(column.name()).toString(), format(toUtc ? toUtc(value) : toLocal(value))));
-        }
-        return changes;
     }
 
     /** The wall-clock time in the zone at the UTC instant {@code utc}. */
@@ -116,12 +70,36 @@ final class TimeShift {
         return utc.atOffset(ZoneOffset.UTC).atZoneSameInstant(zone).toLocalDateTime();
     }
 
+    /** How a single value converts (see {@link #convert}). */
+    enum Kind {
+        /** One clear result. */
+        OK,
+        /** A local time the clocks showed twice (they went back); the earlier offset, its first occurrence, is used. */
+        AMBIGUOUS,
+        /** A local time that never happened (the clocks jumped over it); the value is left unchanged. */
+        GAP
+    }
+
+    /** The converted value of {@link #convert}, and whether it was clear-cut. For {@link Kind#GAP}, the input. */
+    record Conversion(LocalDateTime value, Kind kind) {}
+
     /**
-     * The UTC time of the wall-clock time {@code local} in the zone. A time skipped by a DST change is read as if the
-     * clock had not moved yet; a time that happened twice is taken at its first occurrence.
+     * Converts one value in the direction this shift was made for. Going to UTC, a local time that happened twice is
+     * taken at the earlier offset and flagged {@link Kind#AMBIGUOUS};
+     * a local time that never happened is left as it is and flagged {@link Kind#GAP}. Going to local time is always
+     * {@link Kind#OK}.
      */
-    LocalDateTime toUtc(LocalDateTime local) {
-        return local.atZone(zone).withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
+    Conversion convert(LocalDateTime value) {
+        if (!toUtc) {
+            return new Conversion(toLocal(value), Kind.OK);
+        }
+        List<ZoneOffset> offsets = zone.getRules().getValidOffsets(value);
+        if (offsets.isEmpty()) {
+            return new Conversion(value, Kind.GAP);
+        }
+        LocalDateTime utc = value.atZone(zone).withEarlierOffsetAtOverlap()
+                .withZoneSameInstant(ZoneOffset.UTC).toLocalDateTime();
+        return new Conversion(utc, offsets.size() > 1 ? Kind.AMBIGUOUS : Kind.OK);
     }
 
     /** A stored datetime read as text, or null when it is NULL or not a valid datetime (a zero date, say). */
@@ -136,7 +114,7 @@ final class TimeShift {
         }
     }
 
-    /** A date or datetime typed on the command line or in the cutoffs file: yyyy-MM-dd[ HH:mm[:ss]]. */
+    /** A date or datetime typed on the command line: yyyy-MM-dd[ HH:mm[:ss]]. */
     static LocalDateTime parseInput(String text) {
         try {
             return LocalDateTime.parse(text.trim(), INPUT);
