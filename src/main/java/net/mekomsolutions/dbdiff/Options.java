@@ -6,7 +6,10 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -35,10 +38,14 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
      * @param chunkSize rows per transaction in table mode and undo (--chunk-size)
      * @param runId the run to undo (--run-id), or null
      * @param siteLocation the location whose own rows to find key ranges for (--site-location), or null
+     * @param convertEdited also convert rows changed or voided on or after --before (--convert-edited)
+     * @param anchors column deciding which rows of a table qualify, instead of date_created (--anchor-column), by
+     *                lower-case table name
      */
     record Timezone(String database, LocalDateTime from, LocalDateTime before, ZoneId zone,
                     Set<String> skipped, boolean toUtc, Action action, List<String> tables, boolean allTables,
-                    Path excludeKeysFile, int chunkSize, String runId, String siteLocation) {
+                    Path excludeKeysFile, int chunkSize, String runId, String siteLocation, boolean convertEdited,
+                    Map<String, String> anchors) {
 
         TimeShift.Window window() {
             return before == null ? null : new TimeShift.Window(from, before);
@@ -86,6 +93,8 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
               --exclude-keys <file>          CSV table,pk_from,pk_to,label: key ranges never touched
               --skip-columns <t.c>[,<t.c>]   default: obs.value_datetime ("" for none)
               --chunk-size <n>               rows per transaction with --apply; default 5000
+              --convert-edited               also convert rows changed or voided on/after --before
+              --anchor-column <t.c>[,<t.c>]  qualify rows of table t by column c instead of date_created
               --db target|source             database to fix; default: target
               --undo                         with --table/--tables/--all-tables and/or --run-id <id>
               --suggest-site-keys --site-location <name|uuid|id>  [--table ...] [--before <date>]
@@ -116,6 +125,8 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
         Integer chunkSize = null;
         String runId = null;
         String siteLocation = null;
+        boolean convertEdited = false;
+        Map<String, String> anchors = new LinkedHashMap<>();
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
@@ -173,6 +184,16 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
                     }
                 }
                 case "--all-tables" -> allTables = true;
+                case "--convert-edited" -> convertEdited = true;
+                case "--anchor-column" -> {
+                    for (String spec : valueOf(args, ++i, arg).split(",")) {
+                        String[] parts = spec.trim().split("\\.");
+                        if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+                            throw new IllegalArgumentException("--anchor-column takes table.column, not " + spec);
+                        }
+                        anchors.put(parts[0].trim().toLowerCase(Locale.ROOT), parts[1].trim());
+                    }
+                }
                 case "--undo" -> undo = true;
                 case "--suggest-site-keys" -> suggest = true;
                 case "--exclude-keys" -> excludeKeys = Path.of(valueOf(args, ++i, arg));
@@ -197,7 +218,7 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
         }
         boolean timezoneOptions = database != null || from != null || before != null
                 || zone != null || skipped != null || to != null || !tables.isEmpty() || allTables || undo
-                || suggest || excludeKeys != null || chunkSize != null || runId != null || siteLocation != null;
+                || suggest || excludeKeys != null || chunkSize != null || runId != null || siteLocation != null || convertEdited || !anchors.isEmpty();
         if (timezoneOptions && !command.equals("timezone")) {
             throw new IllegalArgumentException("--db, --from, --before, --zone, --to, --skip-columns and"
                     + " the table, undo and site key options only go with timezone");
@@ -220,6 +241,9 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
             }
             if (siteLocation != null && action != Action.SUGGEST_SITE_KEYS) {
                 throw new IllegalArgumentException("--site-location only goes with --suggest-site-keys");
+            }
+            if ((convertEdited || !anchors.isEmpty()) && action != Action.TABLES) {
+                throw new IllegalArgumentException("--convert-edited and --anchor-column only go with converting");
             }
             if (excludeKeys != null && action != Action.TABLES) {
                 throw new IllegalArgumentException("--exclude-keys only goes with --table, --tables or --all-tables");
@@ -271,7 +295,8 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
         Set<String> skip = skipped != null ? Set.copyOf(skipped) : DEFAULT_SKIPPED;
         Timezone timezone = !command.equals("timezone") ? null : new Timezone(
                 database == null ? "target" : database, from, before, zone, skip, "utc".equals(to), action, List.copyOf(tables), allTables, excludeKeys,
-                chunkSize == null ? DEFAULT_CHUNK_SIZE : chunkSize, runId, siteLocation);
+                chunkSize == null ? DEFAULT_CHUNK_SIZE : chunkSize, runId, siteLocation, convertEdited,
+                Map.copyOf(anchors));
         if (timezone != null && before != null) {
             new TimeShift.Window(from, before); // fails early on a window that ends before it starts
         }

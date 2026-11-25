@@ -18,6 +18,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -53,6 +54,9 @@ final class TableTimezoneRun {
             List.of("start_datetime", "end_datetime"),
             List.of("date_enrolled", "date_completed"));
 
+    /** A row changed or voided at or after --before with one of these was edited after the change of convention. */
+    static final List<String> EDIT_COLUMNS = List.of("date_changed", "date_voided", "date_retired");
+
     /** One row read from a table. */
     private record Row(long key, String uuid, Map<String, LocalDateTime> values, Set<String> unreadable,
                        Map<String, Long> refs) {}
@@ -83,12 +87,15 @@ final class TableTimezoneRun {
         long placeholders;
         long alreadyShifted;
         long endBeforeStart;
+        long edited;
+        long nullAnchor;
         final Map<String, ColumnStats> columns = new LinkedHashMap<>();
     }
 
     /** The report files of a run. */
     private record Reports(CsvWriter changes, CsvWriter tables, CsvWriter columns, CsvWriter histogram,
-                           CsvWriter endBeforeStart, CsvWriter ambiguous, CsvWriter gap) implements AutoCloseable {
+                           CsvWriter endBeforeStart, CsvWriter ambiguous, CsvWriter gap, CsvWriter edited,
+                           CsvWriter nullAnchor) implements AutoCloseable {
 
         static Reports open(Path dir) throws IOException {
             return new Reports(
@@ -96,7 +103,7 @@ final class TableTimezoneRun {
                             List.of("table", "pk", "uuid", "column", "old_value", "new_value")),
                     new CsvWriter(dir.resolve("tables.csv"), List.of("table", "status", "rows_in_range",
                             "rows_to_change", "values_to_change", "skipped_site_keys", "skipped_placeholder",
-                            "already_shifted", "end_before_start", "detail")),
+                            "already_shifted", "end_before_start", "skipped_edited", "null_anchor", "detail")),
                     new CsvWriter(dir.resolve("columns.csv"), List.of("table", "column", "values_changed",
                             "skipped_post_migration", "midnight_values", "ambiguous", "gap", "unreadable")),
                     new CsvWriter(dir.resolve("hour-histogram.csv"),
@@ -106,12 +113,16 @@ final class TableTimezoneRun {
                     new CsvWriter(dir.resolve("dst-ambiguous.csv"),
                             List.of("table", "pk", "uuid", "column", "value", "converted_with_earlier_offset")),
                     new CsvWriter(dir.resolve("dst-gap.csv"),
-                            List.of("table", "pk", "uuid", "column", "value_left_unchanged")));
+                            List.of("table", "pk", "uuid", "column", "value_left_unchanged")),
+                    new CsvWriter(dir.resolve("edited-after-cutoff.csv"),
+                            List.of("table", "pk", "uuid", "edited_column", "edited_value", "current_values")),
+                    new CsvWriter(dir.resolve("null-date-created.csv"), List.of("table", "pk", "uuid", "column")));
         }
 
         @Override
         public void close() throws IOException {
-            for (CsvWriter w : List.of(changes, tables, columns, histogram, endBeforeStart, ambiguous, gap)) {
+            for (CsvWriter w : List.of(changes, tables, columns, histogram, endBeforeStart, ambiguous, gap, edited,
+                    nullAnchor)) {
                 w.close();
             }
         }
@@ -142,7 +153,8 @@ final class TableTimezoneRun {
             Schema schema = schemaReader.read(conn);
             TimeShift shift = new TimeShift(tz.zone(), tz.toUtc());
             ExcludedKeys keys = ExcludedKeys.load(tz.excludeKeysFile());
-            List<Candidate> candidates = TimezoneTables.select(schema, config, tz.tables(), tz.allTables());
+            List<Candidate> candidates = TimezoneTables.select(schema, config, tz.tables(), tz.allTables(),
+                    tz.anchors());
             Log.info("Rows with date_created in [" + tz.window() + ") move " + (tz.toUtc() ? "from " + tz.zone()
                     + " time to UTC" : "from UTC to " + tz.zone() + " time") + "; never converted: "
                     + (tz.skipped().isEmpty() ? "(none)" : String.join(", ", tz.skipped())));
@@ -164,12 +176,16 @@ final class TableTimezoneRun {
             Files.createDirectories(dir);
             Placeholders placeholders = new Placeholders(conn, schema, config.placeholderUuid());
             boolean failed = false;
+            List<String> warnings = new ArrayList<>();
             try (Reports reports = Reports.open(dir)) {
                 for (Candidate c : candidates) {
                     String name = c.table().name();
                     if (!c.usable()) {
                         Log.info(name + ": skipped, " + c.problem());
-                        reports.tables().row(List.of(name, "SKIPPED", "", "", "", "", "", "", "", c.problem()));
+                        reports.tables().row(List.of(name, "SKIPPED", "", "", "", "", "", "", "", "", "", c.problem()));
+                        if (c.problem().startsWith(TimezoneTables.NO_ANCHOR)) {
+                            warnings.add(name + ": not converted, " + c.problem());
+                        }
                         continue;
                     }
                     TableStats stats = new TableStats();
@@ -185,16 +201,26 @@ final class TableTimezoneRun {
                         Log.warn(name + ": " + e.getMessage());
                     }
                     report(reports, name, status, detail, stats);
+                    if (stats.edited > 0) {
+                        warnings.add(name + ": " + stats.edited + " row(s) edited on or after --before left as they"
+                                + " are (edited-after-cutoff.csv; --convert-edited converts them)");
+                    }
+                    if (stats.nullAnchor > 0) {
+                        warnings.add(name + ": " + stats.nullAnchor + " row(s) with no " + c.anchor()
+                                + " not converted (null-date-created.csv)");
+                    }
                     Log.info(String.format("%s: %s, %d rows in range, %d to change (%d values), site keys %d,"
                                     + " placeholders %d, already shifted %d, end before start %d", name, status,
                             stats.rowsInRange, stats.rowsToChange, stats.valuesToChange, stats.siteKeys,
-                            stats.placeholders, stats.alreadyShifted, stats.endBeforeStart));
+                            stats.placeholders, stats.alreadyShifted, stats.endBeforeStart)
+                            + (stats.edited > 0 ? ", edited after cutoff " + stats.edited : ""));
                     if (status.equals("FAILED") && !conn.isValid(5)) {
                         throw new SQLException("Lost the database connection during " + name + "; stopping."
                                 + " Committed chunks stay committed and are skipped on a re-run.");
                     }
                 }
             }
+            warnings.forEach(w -> Log.warn(w));
             Log.info("Report written to " + dir.toAbsolutePath());
             if (!apply) {
                 Log.info("Nothing was written. Check changes.csv, columns.csv and hour-histogram.csv, then re-run"
@@ -236,8 +262,8 @@ final class TableTimezoneRun {
         columns.addAll(datetimes);
         columns.addAll(parentKeys.keySet());
         String sql = "SELECT " + columns.stream().map(Db::q).collect(Collectors.joining(", ")) + " FROM " + Db.q(name)
-                + " WHERE " + Db.q(pk) + " > ? AND " + Db.q("date_created") + " < ?"
-                + (tz.from() == null ? "" : " AND " + Db.q("date_created") + " >= ?")
+                + " WHERE " + Db.q(pk) + " > ? AND " + Db.q(c.anchor()) + " < ?"
+                + (tz.from() == null ? "" : " AND " + Db.q(c.anchor()) + " >= ?")
                 + " ORDER BY " + Db.q(pk) + " LIMIT ?";
         long last = Long.MIN_VALUE;
         while (true) {
@@ -260,6 +286,13 @@ final class TableTimezoneRun {
                 }
                 if (isPlaceholder(row, placeholders.uuid(), parentKeys)) {
                     stats.placeholders++;
+                    continue;
+                }
+                String edit = tz.convertEdited() ? null : editedAfter(row, tz.before());
+                if (edit != null) {
+                    stats.edited++;
+                    reports.edited().row(List.of(name, "" + row.key(), nz(row.uuid()), edit,
+                            TimeShift.format(row.values().get(edit)), describe(row, datetimes)));
                     continue;
                 }
                 List<Value> values = new ArrayList<>();
@@ -314,6 +347,37 @@ final class TableTimezoneRun {
             Log.info(String.format("  %s: %d rows read (up to %s %d), %d %s", name, stats.rowsInRange, pk, last,
                     stats.rowsToChange, apply ? "converted and committed" : "to convert"));
         }
+        listNullAnchors(conn, table, pk, c.anchor(), stats, reports);
+    }
+
+    /** Lists the rows that have no value in the anchor column: they cannot be placed in the range, so stay as they are. */
+    private static void listNullAnchors(Connection conn, Schema.Table table, String pk, String anchor,
+                                        TableStats stats, Reports reports) throws SQLException, IOException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT " + Db.q(pk)
+                + (table.hasUuid() ? ", " + Db.q("uuid") : "") + " FROM " + Db.q(table.name()) + " WHERE "
+                + Db.q(anchor) + " IS NULL ORDER BY " + Db.q(pk)); ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                stats.nullAnchor++;
+                reports.nullAnchor().row(List.of(table.name(), "" + rs.getLong(1),
+                        table.hasUuid() ? nz(rs.getString(2)) : "", anchor));
+            }
+        }
+    }
+
+    /** The first edit column of {@code row} at or after {@code before}, or null when it was not edited since. */
+    private static String editedAfter(Row row, LocalDateTime before) {
+        for (String col : row.values().keySet().stream().sorted().toList()) {
+            LocalDateTime value = row.values().get(col);
+            if (value != null && !value.isBefore(before) && EDIT_COLUMNS.contains(col.toLowerCase(Locale.ROOT))) {
+                return col;
+            }
+        }
+        return null;
+    }
+
+    private static String describe(Row row, List<String> columns) {
+        return columns.stream().map(c -> c + "=" + (row.values().get(c) == null ? "" : TimeShift.format(row.values()
+                .get(c)))).collect(Collectors.joining("; "));
     }
 
     private static List<Row> read(Connection conn, String sql, Schema.Table table, long after, Options.Timezone tz,
@@ -496,7 +560,8 @@ final class TableTimezoneRun {
     private static void report(Reports reports, String table, String status, String detail, TableStats s)
             throws IOException {
         reports.tables().row(List.of(table, status, "" + s.rowsInRange, "" + s.rowsToChange, "" + s.valuesToChange,
-                "" + s.siteKeys, "" + s.placeholders, "" + s.alreadyShifted, "" + s.endBeforeStart, nz(detail)));
+                "" + s.siteKeys, "" + s.placeholders, "" + s.alreadyShifted, "" + s.endBeforeStart, "" + s.edited,
+                "" + s.nullAnchor, nz(detail)));
         for (Map.Entry<String, ColumnStats> e : s.columns.entrySet()) {
             ColumnStats c = e.getValue();
             reports.columns().row(List.of(table, e.getKey(), "" + c.changed, "" + c.postMigration, "" + c.midnight,

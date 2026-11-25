@@ -33,7 +33,11 @@ final class TimezoneTables {
     private TimezoneTables() {}
 
     /** A table to work on, or why it cannot be. */
-    record Candidate(Schema.Table table, String problem) {
+    record Candidate(Schema.Table table, String problem, String anchor) {
+
+        Candidate(Schema.Table table, String problem) {
+            this(table, problem, "date_created");
+        }
 
         boolean usable() {
             return problem == null;
@@ -50,13 +54,27 @@ final class TimezoneTables {
      * cannot be converted, or is one of the excluded tables, comes back with its problem.
      */
     static List<Candidate> select(Schema schema, SyncConfig config, List<String> names, boolean all) {
+        return select(schema, config, names, all, Map.of());
+    }
+
+    /**
+     * As {@link #select(Schema, SyncConfig, List, boolean)}, with {@code anchors} naming, by lower-case table name, the
+     * column that decides which rows qualify when it is not date_created.
+     */
+    static List<Candidate> select(Schema schema, SyncConfig config, List<String> names, boolean all,
+                                  Map<String, String> anchors) {
+        for (String table : anchors.keySet()) {
+            if (schema.tables().stream().noneMatch(t -> t.name().equalsIgnoreCase(table))) {
+                throw new IllegalArgumentException("--anchor-column: no table " + table + " in the database");
+            }
+        }
         List<Candidate> selected = new ArrayList<>();
         if (all) {
             for (Schema.Table table : schema.tables()) {
                 if (datetimeColumns(table).isEmpty() || isSystem(table.name()) || config.isExcluded(table.name())) {
                     continue;
                 }
-                selected.add(new Candidate(table, problem(table)));
+                selected.add(candidate(table, anchors));
             }
             return selected;
         }
@@ -69,7 +87,7 @@ final class TimezoneTables {
             if (table.name().toLowerCase(Locale.ROOT).startsWith("dbdiff_")) {
                 throw new IllegalArgumentException(table.name() + " is this tool's own table");
             }
-            selected.add(new Candidate(table, config.isExcluded(table.name()) ? EXCLUDED : problem(table)));
+            selected.add(config.isExcluded(table.name()) ? new Candidate(table, EXCLUDED) : candidate(table, anchors));
         }
         return selected;
     }
@@ -82,14 +100,29 @@ final class TimezoneTables {
         return SYSTEM_TABLES.contains(name) || SYSTEM_PREFIXES.stream().anyMatch(name::startsWith);
     }
 
+    /** The problem of a table without a column to tell which rows qualify. */
+    static final String NO_ANCHOR = "no date_created column";
+
+    private static Candidate candidate(Schema.Table table, Map<String, String> anchors) {
+        String given = anchors.get(table.name().toLowerCase(Locale.ROOT));
+        String anchor = given == null ? "date_created" : table.columns().stream()
+                .map(Schema.Column::name).filter(c -> c.equalsIgnoreCase(given)).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("--anchor-column: no column " + given + " in "
+                        + table.name()));
+        return new Candidate(table, problem(table, anchor), anchor);
+    }
+
     /** Why rows of {@code table} cannot be converted one by one, or null when they can. */
-    private static String problem(Schema.Table table) {
+    private static String problem(Schema.Table table, String anchor) {
         if (datetimeColumns(table).isEmpty()) {
             return "no DATETIME column";
         }
-        Schema.Column created = table.column("date_created");
-        if (created == null || !"datetime".equals(created.dataType())) {
-            return "no DATETIME date_created column to tell which rows to convert";
+        Schema.Column column = table.column(anchor);
+        if (column == null) {
+            return NO_ANCHOR + " (give one with --anchor-column " + table.name() + ".<column>)";
+        }
+        if (!"datetime".equals(column.dataType())) {
+            return anchor + " is not a DATETIME column";
         }
         if (table.primaryKey().size() != 1) {
             return table.primaryKey().isEmpty() ? "no primary key" : "composite primary key";

@@ -84,7 +84,7 @@ class TableTimezoneRunTest {
 
     @Test
     void dryRunReportsEverythingAndWritesNothing() throws Exception {
-        assertEquals(0, run("--table", "visit"));
+        assertEquals(0, run("--table", "visit", "--convert-edited"));
 
         assertEquals("2023-07-01 10:00:00", visit(1, "date_started"));
         assertEquals(List.of(
@@ -99,7 +99,7 @@ class TableTimezoneRunTest {
                 "visit,7,v7,date_started,2024-12-01 09:00:00,2024-12-01 14:00:00",          // winter: +5h
                 "visit,7,v7,date_created,2024-12-01 09:00:00,2024-12-01 14:00:00"),
                 report("changes.csv").subList(1, 11));
-        assertEquals("visit,WOULD_CHANGE,7,5,10,0,2,0,1,", report("tables.csv").get(1));
+        assertEquals("visit,WOULD_CHANGE,7,5,10,0,2,0,1,0,0,", report("tables.csv").get(1));
         assertEquals(List.of(
                 "visit,date_started,4,0,0,1,1,0",
                 "visit,date_stopped,2,1,0,0,0,0",
@@ -118,7 +118,7 @@ class TableTimezoneRunTest {
     void applyConvertsInChunksSkipsWhatItMustAndRunsOnce() throws Exception {
         Path keys = Files.writeString(dir.resolve("keys.csv"), "table,pk_from,pk_to,label\nvisit,7,7,Own Site\n");
         assertEquals(0, run("--tables", "visit,person,obs", "--exclude-keys", keys.toString(), "--chunk-size", "2",
-                "--apply", "--yes"));
+                "--convert-edited", "--apply", "--yes"));
 
         assertEquals("2023-07-01 14:00:00", visit(1, "date_started"));           // summer: +4h
         assertEquals("2026-09-01 08:00:00", visit(1, "date_changed"));           // after the migration
@@ -141,10 +141,11 @@ class TableTimezoneRunTest {
                         + " AND row_key = '1'"));
 
         clearReports();
-        assertEquals(0, run("--table", "visit", "--exclude-keys", keys.toString(), "--apply", "--yes"));
+        assertEquals(0, run("--table", "visit", "--exclude-keys", keys.toString(), "--convert-edited", "--apply",
+                "--yes"));
         assertEquals("2023-07-01 14:00:00", visit(1, "date_started"));
         // visit 4 now reads 2026-08-27 02:00 UTC, out of the range; the other three are in the log
-        assertEquals("visit,NOTHING_TO_CHANGE,6,0,0,1,2,3,0,", report("tables.csv").get(1));
+        assertEquals("visit,NOTHING_TO_CHANGE,6,0,0,1,2,3,0,0,0,", report("tables.csv").get(1));
     }
 
     @Test
@@ -175,8 +176,38 @@ class TableTimezoneRunTest {
     }
 
     @Test
+    void leavesRowsEditedAfterTheCutoffAndRowsWithoutAnAnchorForReview() throws Exception {
+        db.execute("CREATE TABLE log_entry (log_id INT PRIMARY KEY, logged_at DATETIME, date_created DATETIME)",
+                "INSERT INTO log_entry VALUES (1, '2022-01-01 10:00:00', NULL), (2, '2022-01-01 10:00:00',"
+                        + " '2022-01-01 10:00:00')",
+                "CREATE TABLE request (request_id INT PRIMARY KEY, request_datetime DATETIME)",
+                "INSERT INTO request VALUES (1, '2022-01-01 10:00:00')");
+        schema = db.schema();
+
+        assertEquals(0, run("--tables", "visit,log_entry,request", "--apply", "--yes"));
+
+        assertEquals("2023-07-01 10:00:00", visit(1, "date_started"));           // changed 2026-09-01: left
+        assertEquals("2023-11-05 05:30:00", visit(2, "date_started"));
+        assertEquals("visit,1,v1,date_changed,2026-09-01 08:00:00,date_started=2023-07-01 10:00:00;"
+                + " date_stopped=2023-07-01 11:30:00; date_created=2023-07-01 10:05:00;"
+                + " date_changed=2026-09-01 08:00:00", report("edited-after-cutoff.csv").get(1));
+        assertEquals("2022-01-01 10:00:00", db.queryString("SELECT logged_at FROM log_entry WHERE log_id = 1"));
+        assertEquals("2022-01-01 15:00:00", db.queryString("SELECT logged_at FROM log_entry WHERE log_id = 2"));
+        assertEquals("log_entry,1,,date_created", report("null-date-created.csv").get(1));
+        List<String> tables = report("tables.csv");
+        assertEquals("visit,CHANGED,7,4,7,0,2,0,1,1,0,", tables.get(1));
+        assertEquals("log_entry,CHANGED,1,1,2,0,0,0,0,0,1,", tables.get(2));
+        assertTrue(tables.get(3).startsWith("request,SKIPPED,,,,,,,,,," + TimezoneTables.NO_ANCHOR), tables.get(3));
+        assertEquals("2022-01-01 10:00:00", db.queryString("SELECT request_datetime FROM request"));
+
+        clearReports();
+        assertEquals(0, run("--table", "request", "--anchor-column", "request.request_datetime", "--apply", "--yes"));
+        assertEquals("2022-01-01 15:00:00", db.queryString("SELECT request_datetime FROM request"));
+    }
+
+    @Test
     void undoRestoresByRunIdOrTable() throws Exception {
-        assertEquals(0, run("--table", "visit", "--apply", "--yes"));
+        assertEquals(0, run("--table", "visit", "--convert-edited", "--apply", "--yes"));
         String runId = db.queryString("SELECT MIN(run_id) FROM " + ShiftLog.TABLE);
         assertEquals(0, run("--table", "person", "--apply", "--yes"));
 

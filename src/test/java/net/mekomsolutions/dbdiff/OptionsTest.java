@@ -111,6 +111,15 @@ class OptionsTest {
         assertTrue(timezone("--to", "utc", "--all-tables", "--before", "2026-08-27", "--skip-columns", "")
                 .timezone().skipped().isEmpty());
         assertEquals(5000, timezone("--to", "utc", "--all-tables", "--before", "2026-08-27").timezone().chunkSize());
+        Options edited = timezone("--to", "utc", "--all-tables", "--before", "2026-08-27", "--convert-edited",
+                "--anchor-column", "Request.request_datetime");
+        assertTrue(edited.timezone().convertEdited());
+        assertEquals(java.util.Map.of("request", "request_datetime"), edited.timezone().anchors());
+        assertFalse(o.timezone().convertEdited());
+        assertThrows(IllegalArgumentException.class, () -> timezone("--to", "utc", "--all-tables", "--before",
+                "2026-08-27", "--anchor-column", "request"));
+        assertThrows(IllegalArgumentException.class,
+                () -> Options.parse("timezone", "--undo", "--table", "visit", "--convert-edited"));
 
         assertThrows(IllegalArgumentException.class, () -> timezone("--to", "utc", "--table", "visit"));
         assertThrows(IllegalArgumentException.class,
