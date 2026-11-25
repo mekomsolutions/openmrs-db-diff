@@ -1,233 +1,140 @@
 # openmrs-db-diff
 
 Finds patient data that exists in one OpenMRS database but is missing from another, reports it, and copies it
-across, one patient at a time.
+across, one patient at a time. It can also fix datetime(s) that were saved in the wrong time zone.
 
 - **source**: the database with the extra data
-- **target**: the source of truth that receives the missing rows
+- **target**: the database you trust, which receives the missing rows
 
-Every table is in scope except those listed in `config/excluded-tables.txt` (metadata, logs, Liquibase).
+Every table is compared except the ones in `config/excluded-tables.txt` (metadata, logs, Liquibase).
 
-## How it works
+## Quick start
 
-Before the patients, reconcile the metadata (see [Reconciling metadata](#reconciling-metadata)): rows can only be
-copied when the concepts, locations, attribute types and other metadata they point at are in the target.
-
-The tool takes a list of patients (person uuids) and runs each one through the same steps. A patient that fails
-is reported and nothing is written for it; the run carries on with the next one.
-
-1. **Collect.** Starting from the patient's `person` row, follow every foreign key that points back at it, level
-   by level: names, addresses, the `patient` row, identifiers, visits, encounters, obs, orders, programs, and so
-   on. `users` and `provider` rows are never part of a patient's record, since they record who entered the data.
-2. **Compare.** Rows are matched by `uuid`. Tables without a uuid column are matched by their primary key with
-   foreign keys translated to the uuid of the row they point at (for example `patient` matches through
-   `person.uuid`, `drug_order` through `orders.uuid`, `user_role` through `users.uuid` + role).
-   A row the target already has must also sit in the same place there: same patient, same visit, same encounter,
-   same obs group. If it does not (legacy imports generated uuids from local ids, so two sites can share a uuid
-   for unrelated rows), the patient is a *conflict* and nothing is copied for it; see `conflicts.csv`.
-   The exception is a *placeholder*: a row a database merge pointed at a placeholder parent (a person, visit,
-   encounter, location, user, ... with uuid `[PHANTOM_UUID]`) because the real one was not known yet. The sync
-   writes the source row over it, keeping its id, so whatever already points at it (obs, providers) ends up on the
-   right patient and visit. Set `placeholderUuid` in `sync.properties` if your merge used another marker; leave it
-   empty to turn this off.
-3. **Plan.** A missing row can be copied when every foreign key it holds points at a row that is already in the
-   target (matched by uuid) or is copied with it. Rows the patient's data points at that the target lacks, such
-   as the user who registered the patient, are pulled in from the source and copied too, together with the rows
-   that extend them (`user_role` for a user, `patient` for a person). Missing metadata is mapped or copied as the
-   metadata decisions say. Anything else is *blocked* with a reason, for example an obs on a concept the target
-   does not have. Rows that depend on a blocked row are blocked too.
-4. **Sync.** Rows are inserted parents first. Auto-increment ids are assigned by the target, and every foreign
-   key (person_id, encounter_id, concept_id, creator, obs_group_id, ...) is rewritten to the target's id for the
-   same uuid. Foreign-key cycles (person ↔ users) and obs groups are handled with a temporary value that is fixed
-   once the parent row exists. Each patient is one transaction: any error rolls back that patient only.
-
-## Build
-
-Requires Java 17+ and Maven.
+You need Java 17+ and Maven.
 
 ```bash
 mvn clean package
+cp config/sync.properties.example config/sync.properties   # fill in both databases
 ```
 
-This produces `target/openmrs-db-diff.jar`.
+`docker port <container> 3306` tells you which host port a container uses for MySQL.
 
-## Configure
-
-```bash
-cp config/sync.properties.example config/sync.properties
-```
-
-Set the JDBC URLs, user and password of both databases. To find the host port each container publishes MySQL on:
+Then work through it step by step. Only `sync --apply` writes anything:
 
 ```bash
-docker port <container name> 3306
-```
+java -jar target/openmrs-db-diff.jar metadata       # 1. metadata the target lacks (read-only)
+java -jar target/openmrs-db-diff.jar report         # 2. what's missing (read-only)
+java -jar target/openmrs-db-diff.jar sync           # 3. dry run: insert, then roll back
 
-If the containers do not publish port 3306, either add a port mapping or run the jar from a container on the same
-Docker network and use the container names as hosts (`jdbc:mysql://<container name>:3306/openmrs`).
-
-## Run
-
-```bash
-# 0. Metadata the target lacks, and suggested decisions (read-only); see "Reconciling metadata"
-java -jar target/openmrs-db-diff.jar metadata
-
-# 1. Report only (read-only on both databases)
-java -jar target/openmrs-db-diff.jar report
-
-# 2. Dry run: performs every patient's inserts inside a transaction, then rolls back
-java -jar target/openmrs-db-diff.jar sync
-
-# 3. Back up the target first, then apply (asks you to type APPLY)
-docker exec <container name> sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction openmrs' > backup.sql
+# 4. back up the target, then apply (you'll be asked to type APPLY)
+docker exec <container> sh -c 'mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction openmrs' > backup.sql
 java -jar target/openmrs-db-diff.jar sync --apply
 
-# 4. Confirm: only blocked rows should remain
-java -jar target/openmrs-db-diff.jar report
+java -jar target/openmrs-db-diff.jar report         # 5. only blocked rows should be left
 ```
 
-### Reconciling metadata
+Afterwards, restart OpenMRS and rebuild the search index (**Administration → Search Index**). Otherwise the new
+patients won't show up in search.
 
-Metadata tables are the excluded tables listed in `config/metadata-tables.txt`: concepts, locations, encounter
-types, attribute types and so on. Other excluded tables, such as Liquibase's, logs, event queues and audit tables,
-are not metadata and are left alone. Edit the list to match your databases; every table in it must also be
-excluded, and must have a uuid column in both databases. Metadata tables are never compared patient by patient. When a patient's rows point at metadata the target
-does not have under the same uuid, those rows are blocked, and so is everything that depends on them. One missing
-location can block every obs recorded there.
+## How a patient is synced
 
-```bash
-java -jar target/openmrs-db-diff.jar metadata
-```
+1. **Collect** everything that hangs off the patient's `person` row: names, identifiers, visits, encounters, obs,
+   orders, programs and so on. `users` and `provider` rows don't belong to any one patient.
+2. **Compare** rows by `uuid`. Tables without a uuid are matched through their keys, so `patient` matches through
+   `person.uuid`, for example. If the target has the row but attached to a different patient, visit or encounter,
+   the patient is a **conflict** and nothing is copied. Legacy imports sometimes reused uuids, so this catches
+   that.
+3. **Plan** which missing rows can go in. A row is **blocked** if it points at something the target doesn't have,
+   such as a concept, and so is anything that depends on it.
+4. **Insert** parents first, letting the target hand out new ids and rewriting every foreign key to match. Each
+   patient is one transaction, so a failure only rolls back that patient.
 
-This compares every listed metadata table and writes two files to a new folder under `output/`:
+**Placeholders.** When a database merge didn't know a row's real parent yet, it pointed the row at a placeholder:
+a person, visit, user and so on with uuid `[PHANTOM_UUID]`. The sync writes the real source row over the
+placeholder, keeping its id. Set `placeholderUuid` in `sync.properties` if your merge used another marker, or leave
+it empty to turn this off.
 
-| File | Contents |
-| --- | --- |
-| `metadata.csv` | Every metadata row the source has and the target lacks: name, how many synced rows use it and in which tables, which other missing metadata needs it (a location's parent), target rows with the same name, and the suggestion |
-| `metadata-decisions.csv` | A suggested decision for each of those rows that patient data needs |
+## Metadata first
 
-The decisions are:
+Patient rows can only be copied if the concepts, locations, attribute types and other metadata they point at exist
+in the target. `metadata` compares the tables listed in `config/metadata-tables.txt` and writes:
 
-| Action | When | What the sync does |
+- `metadata.csv`: every metadata row the target lacks, and how many patient rows need it
+- `metadata-decisions.csv`: a suggested decision for each
+
+Review the decisions and save the file as `config/metadata-decisions.csv`. `report` and `sync` follow it from then
+on:
+
+| Decision | Use it when | What happens |
 | --- | --- | --- |
-| `MAP` | The target has it under another uuid (suggested when exactly one target row has the same name) | Rows that point at it are copied pointing at the target's row given in `target_uuid` |
-| `COPY` | The target does not have it (suggested when no target row has the same name) | The row is copied along with the first patient that needs it |
-| `SKIP` | Leave it alone (suggested when several target rows have the same name, so a person has to choose) | Rows that need it stay blocked |
+| `MAP` | the target has it under another uuid | rows point at the target's row (`target_uuid`) |
+| `COPY` | the target doesn't have it | it's copied with the first patient that needs it |
+| `SKIP` | you're not sure yet | rows that need it stay blocked |
 
-Review the file, change any decision you disagree with (for example turn a `SKIP` into a `MAP` by filling in the
-`target_uuid` you want), and save it as `output/20261022-234928/metadata-decisions.csv`, next to `sync.properties` (another path
-can be set with `metadataDecisionsFile` in `sync.properties`). From then on `report` and `sync` follow it; a dry
-run shows the effect before anything is written. Metadata that is not in the file is treated as `SKIP`, and only
-rows of listed metadata tables are ever mapped or copied.
+## Choosing patients
 
-Names are matched exactly (case-insensitively on MySQL): the `name` column, a primary key that is the name itself
-(`role`, `privilege`), or a concept's fully specified name.
-A copied row only brings its own columns: a copied location does not bring its tags or attributes.
-
-### Choosing patients
-
-Without patient options, every patient in the source is processed, in `patient_id` order. To process only some:
+By default every patient in the source is processed. To process only some:
 
 ```bash
-# One or more patients (person uuids), comma-separated or repeated
-java -jar target/openmrs-db-diff.jar sync --patient 0b2e...,7f41... --patient 9c3d...
-
-# A file with one uuid per line; blank lines and anything after # are ignored
-java -jar target/openmrs-db-diff.jar sync --patients-file patients.txt
+java -jar target/openmrs-db-diff.jar sync --patient <uuid>,<uuid>
+java -jar target/openmrs-db-diff.jar sync --patients-file patients.txt   # one uuid per line, # for comments
 ```
 
-Both options can be combined. A good way to start is a report on all patients, then a dry run and apply on a
-handful, then the rest.
+A good rhythm is to report on everyone, then dry-run and apply a handful, then do the rest. `--config` points at
+another config file and `--yes` skips the APPLY prompt.
 
-Other options: `--config path/to/file.properties` points at another config file, and `--yes` skips the APPLY
-prompt. The exit code is 0 when every patient went through, 1 when at least one failed, and 2 for bad arguments.
+## What you get
 
-### Output
+Each run writes a timestamped folder under `output/`:
 
-Each run prints one line per patient and writes a timestamped folder under `output/`:
+- `patients.csv`: one line per patient with its status and counts
+- `summary.csv`: totals per table
+- `missing/<table>.csv`: every missing row, and whether it can be synced
+- `blocked.csv`: rows that can't be synced, and why
+- `conflicts.csv`: rows attached to a different parent in the target
 
-| File | Contents |
-| --- | --- |
-| `patients.csv` | Per patient: status, rows in the source, missing from the target, syncable, blocked, inserted (placeholders written over included), placeholders, conflicts, error |
-| `summary.csv` | Per table totals over all patients |
-| `missing/<table>.csv` | Every missing row exactly as it is in the source, with its patient and whether it can be synced (`syncable`, `placeholder` or `blocked`) |
-| `blocked.csv` | Missing rows that cannot be synced, and why |
-| `conflicts.csv` | Rows the target already has under the same uuid but attached to a different parent: the column, and the parent in each database |
+Statuses: `IN_SYNC`, `MISSING` (report), `DRY_RUN_OK`, `SYNCED`, `BLOCKED`, `CONFLICT`, `NOT_FOUND`, `FAILED`.
+A failed patient has nothing written, and the run moves on to the next one.
 
-Patient statuses:
+## Fixing time zones
 
-| Status | Meaning |
-| --- | --- |
-| `IN_SYNC` | Nothing is missing from the target |
-| `MISSING` | Rows are missing (report mode) |
-| `DRY_RUN_OK` | The dry run inserted the patient's rows without errors and rolled back |
-| `SYNCED` | The patient's rows were inserted and committed |
-| `BLOCKED` | Rows are missing but none can be copied; see `blocked.csv` |
-| `CONFLICT` | Rows the target already has are attached elsewhere there; nothing was copied; see `conflicts.csv` |
-| `NOT_FOUND` | The source has no patient with this uuid |
-| `FAILED` | Something went wrong; nothing was written for this patient. The error is in `patients.csv` |
-
-In a dry run, a row needed by several patients (a user who registered all of them, for example) is counted for
-each of them, since every patient's inserts are rolled back before the next one starts.
-
-## After applying
-
-OpenMRS caches data and keeps a search index, and neither sees rows written straight to the database. After a
-sync, restart OpenMRS (or clear its cache) and rebuild the search index from **Administration → Search Index**,
-otherwise new patients will not show up in patient search.
-
-## Fixing historical times (timezone)
-
-Converts DATETIME values that were stored in the wrong time zone convention, table by table, on one database (the
-target, or the source with `--db source`). Dry run by default; `--apply` writes.
+Sometimes part of a database was saved in local time and the rest in UTC, so old rows read a few hours off. The
+`timezone` command fixes them table by table. Like everything else, it's a dry run until you add `--apply`.
 
 ```bash
-# 1. Optional: find the key ranges of rows to leave alone (read-only), review the CSV it writes
-java -jar target/openmrs-db-diff.jar timezone --suggest-site-keys --site-location "Main Clinic" --all-tables \
-    --before 2024-06-01
+# Optional: find the key ranges of rows to leave alone, e.g. one site's own rows in a merged database (read-only)
+java -jar target/openmrs-db-diff.jar timezone --suggest-site-keys --site-location "Main Clinic" --before 2024-06-01
 
-# 2. Dry run, then back up and add --apply
+# Dry run, check the output, then back up and add --apply
 java -jar target/openmrs-db-diff.jar timezone --zone America/New_York --to utc \
-    --from 2021-01-01 --before 2024-06-01 --table visit --exclude-keys <reviewed site-keys-suggested.csv>
+    --from 2021-01-01 --before 2024-06-01 --table visit --exclude-keys site-keys-suggested.csv
 
-# 3. Undo if needed (dry run without --apply)
+# Changed your mind? Undo a run
 java -jar target/openmrs-db-diff.jar timezone --undo --run-id <run id> --apply
 ```
 
-- `--zone` is the local zone. `--to utc` reads values as local wall-clock time and writes UTC; `--to local` does the
-  reverse. DST comes from the Java zone rules.
-- Tables: `--table`, `--tables a,b` or `--all-tables` (every table with a DATETIME column). Tables in the config's
-  excluded tables file are always skipped, as are `liquibase*`, `global_property`, `scheduler*`, `event_records`,
-  `markers`, `failed_events` and `dbdiff_*`.
-- A row is converted when its `date_created` is in [`--from`, `--before`). All its DATETIME columns change in one
-  UPDATE; DATE columns never, and no single value at or after `--before`.
-- Never touched: rows in an `--exclude-keys` range (CSV `table,pk_from,pk_to,label`; the suggest output works as
-  is), placeholder rows (`placeholderUuid`, any value on 1970-01-01, or a link to a placeholder parent), rows already
-  converted, and `obs.value_datetime` unless `--skip-columns` says otherwise.
-- Going to UTC, a time that repeats when clocks go back takes the earlier offset (`dst-ambiguous.csv`); a time that
-  never happened is left unchanged (`dst-gap.csv`).
-- Output in `output/<run id>-timezone-tables/`: `changes.csv`, `tables.csv`, `columns.csv`, `hour-histogram.csv`
-  (check the clinic hours move the right way) and `end-before-start.csv`.
-- `--apply` commits every `--chunk-size` rows (default 5000) and logs old values in `dbdiff_timezone_shift`; a re-run
-  skips them. `--undo` restores from that log by `--run-id` and/or table, leaving rows edited since. Restart OpenMRS
-  afterwards.
+What it does:
 
-## Things to know
+- It converts rows whose `date_created` falls in [`--from`, `--before`), all their DATETIME columns together. DST
+  follows the zone rules.
+- It leaves alone:
+  - DATE columns
+  - values on or after `--before`
+  - `--exclude-keys` ranges
+  - placeholder rows
+  - rows it already converted
+  - `obs.value_datetime` (change this with `--skip-columns`)
+- Rows edited after `--before` are listed for review rather than converted (`--convert-edited` converts them).
+  Rows without a `date_created` are listed too.
+- `hour-histogram.csv` is the quickest sanity check: clinic hours should move by the zone's offset.
+- Every change is logged in `dbdiff_timezone_shift`, which makes re-runs safe and `--undo` possible. Restart
+  OpenMRS afterwards.
 
-- Only **missing** rows are copied. Rows that exist in both databases but differ are not updated. Their links to
-  the patient's other rows are compared, and a mismatch stops the patient (`CONFLICT`); other columns are not.
-- Only data reachable from a patient is compared. Rows that belong to no patient (a user who never touched a
-  selected patient's data, for example) are not reported.
-- Metadata in excluded tables (concepts, locations, encounter types, identifier types, ...) must be in the target
-  with the same uuid, or be mapped or copied by the metadata decisions. Rows that need other metadata the target
-  lacks end up in `blocked.csv`.
-- `users` and `provider` are not excluded, so users missing from the target are copied along with the first
-  patient whose data needs them.
-- Rows linking two patients (a `relationship`, for example) belong to both. The other person is copied along if
-  the target lacks them, but only their person and patient rows; the rest of their record comes with their own
-  turn.
-- If both databases generated patient identifiers from the same idgen sequence, copied identifiers may later
-  collide with ones the target generates. Check `missing/patient_identifier.csv` before applying.
-- If the connection to either database is lost, the run stops instead of failing every remaining patient. The
-  report covers the patients processed so far; patients already applied stay applied, so it is safe to re-run.
-- Rows with a NULL uuid are ignored.
+## Good to know
+
+- Only **missing** rows are copied. Rows that exist in both databases but differ are left as they are.
+- Rows that belong to no patient aren't compared.
+- Users missing from the target are copied along with the first patient who needs them.
+- If both databases generated identifiers from the same idgen sequence, check `missing/patient_identifier.csv` for
+  future collisions before applying.
+- If a connection drops, the run stops. Patients already applied stay applied, so it's safe to run again.
