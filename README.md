@@ -118,6 +118,7 @@ What it does:
 - It converts rows whose `date_created` falls in [`--from`, `--before`), all their DATETIME columns together. DST
   follows the zone rules.
 - It leaves alone:
+  - tables in `config/excluded-tables.txt` (they were never merged), even when named with `--table`
   - DATE columns
   - values on or after `--before`
   - `--exclude-keys` ranges

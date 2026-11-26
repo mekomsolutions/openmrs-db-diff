@@ -89,7 +89,7 @@ record Options(RunMode mode, Path config, List<String> patientUuids, Path patien
               --to local|utc                 required: local turns stored UTC into zone time; utc, the reverse
               --from <date> --before <date>  range of date_created to convert (yyyy-MM-dd[ HH:mm[:ss]])
               --table <t>, --tables <t>[,<t>]  tables to convert; repeatable
-              --all-tables                   every table with DATETIME columns, minus excluded tables
+              --all-tables                   every table with DATETIME columns; excluded tables are always skipped
               --exclude-keys <file>          CSV table,pk_from,pk_to,label: key ranges never touched
               --skip-columns <t.c>[,<t.c>]   default: obs.value_datetime ("" for none)
               --chunk-size <n>               rows per transaction with --apply; default 5000
